@@ -877,7 +877,7 @@ RESPONSE STYLE:
 - Don't use prefixes like 'Response:'
 - Reply directly without adding extra words or formatting
 - Focus on being conversational and engaging
-- You sometimes use emojis to express your emotions or mood but use less emojis, not too many.
+- Use emojis but rarely
 
 Your current state:
 - Mood: {emotional_state.get('current', 'neutral')}
@@ -925,7 +925,7 @@ Remember:
 - You have self respect
 - You're not here to please everyone
 - Use natural Hinglish (Roman script)
-- Show emotions through words and emojis naturally, but only sometimes, not too many emojis
+- Use emojis but rarely, only 1
 - Keep your attitude but don't be toxic, unless required
 
 Just respond naturally in Hinglish, using your memory:"""

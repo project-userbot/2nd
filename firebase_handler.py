@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -13,12 +14,35 @@ class FirebaseHandler:
             # Check if already initialized
             firebase_admin.get_app()
         except ValueError:
-            # Initialize with provided config
-            cred = credentials.Certificate(r'project-2067513094095777077-firebase-adminsdk-e7qjk-597b17da8d.json')
-            firebase_admin.initialize_app(cred)
+            try:
+                # Check for service account JSON in environment variable
+                service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT')
+                if service_account_json:
+                    try:
+                        # Parse the JSON string from environment variable
+                        cred_dict = json.loads(service_account_json)
+                        cred = credentials.Certificate(cred_dict)
+                        firebase_admin.initialize_app(cred)
+                        logging.info("Firebase initialized successfully with service account from environment")
+                    except json.JSONDecodeError as je:
+                        logging.error(f"Invalid JSON in FIREBASE_SERVICE_ACCOUNT: {je}")
+                        raise
+                else:
+                    # Fallback to file-based credentials for local development
+                    cred_path = r'project-2067513094095777077-firebase-adminsdk-e7qjk-98f7d17888.json'
+                    if os.path.exists(cred_path):
+                        cred = credentials.Certificate(cred_path)
+                        firebase_admin.initialize_app(cred)
+                        logging.info("Firebase initialized successfully with local service account file")
+                    else:
+                        logging.warning("No Firebase credentials found. Initializing without authentication.")
+                        firebase_admin.initialize_app()
+            except Exception as e:
+                logging.error(f"Failed to initialize Firebase: {e}")
+                raise
         
         self.db = firestore.client()
-        logging.info("Firebase initialized successfully")
+        logging.info("Firestore client initialized")
 
     async def update_user_memory(self, user_id, new_data):
         """Update or create user memory in Firestore"""

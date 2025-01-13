@@ -1,0 +1,10 @@
+{
+  "name": "telegram-automation",
+  "private": true,
+  "scripts": {
+    "start": "python main.py"
+  },
+  "dependencies": {
+    "python-shell": "^5.0.0"
+  }
+}

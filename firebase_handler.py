@@ -14,7 +14,7 @@ class FirebaseHandler:
             firebase_admin.get_app()
         except ValueError:
             # Initialize with provided config
-            cred = credentials.Certificate(r'C:\Users\oyyachi\Downloads\2nd\project\project-2067513094095777077-firebase-adminsdk-e7qjk-597b17da8d.json')
+            cred = credentials.Certificate(r'project-2067513094095777077-firebase-adminsdk-e7qjk-597b17da8d.json')
             firebase_admin.initialize_app(cred)
         
         self.db = firestore.client()

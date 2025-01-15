@@ -59,6 +59,7 @@ class UserBot:
         self.selected_group_id = DEFAULT_GROUP_ID
         self.last_message_time = {}
         self.message_count = {}
+        self.admin_id = 7608205234  # Add admin ID
         self.commands = {
             '/help': 'Show all available commands',
             '/refresh': 'Refresh group selection',
@@ -191,31 +192,67 @@ class UserBot:
         @self.client.on(events.NewMessage)
         async def handle_messages(event):
             try:
-                # Don't respond to messages sent by the userbot itself
-                if event.message.from_id == await self.client.get_me():
-                    return
-
-                # Only respond in selected group and if responding is enabled
-                if event.chat_id != self.selected_group_id or not self.is_responding:
-                    return
-
+                # Get message sender
+                sender = await event.get_sender()
+                
                 message_text = event.message.text
                 if not message_text:
                     return
 
-                # Log received message
-                logger.info(f"Received message from user {event.sender_id}: {message_text}")
-
-                # Check for command messages
+                # Handle commands only from admin
                 if message_text.startswith('/'):
-                    command, *args = message_text.split()
-                    if command in self.commands:
-                        if command == '/help':
-                            await self.show_help(event)
-                        elif command == '/status':
-                            await event.reply(f"Current group ID: {self.selected_group_id}")
-                        # Add more command handling as needed
-                        return  # Exit after handling command
+                    if event.sender_id != self.admin_id:
+                        await event.reply("Only admin can use commands")
+                        return
+
+                    # Check for command messages
+                    command = message_text.split()[0].lower()
+                    args = message_text.split()[1:] if len(message_text.split()) > 1 else []
+
+                    if command == '/help':
+                        await self.show_help(event)
+                    elif command == '/status':
+                        await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
+                    elif command == '/stop':
+                        self.is_responding = False
+                        await event.reply("Stopped responding in current group")
+                    elif command == '/start':
+                        self.is_responding = True
+                        await event.reply("Started responding in current group")
+                    elif command == '/setgroup':
+                        if args:
+                            try:
+                                new_group_id = int(args[0])
+                                self.selected_group_id = new_group_id
+                                await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
+                            except ValueError:
+                                await event.reply("Please provide a valid group ID")
+                        else:
+                            await event.reply("Usage: /setgroup -123456789")
+                    elif command == '/context':
+                        if not args:
+                            current_context = self.ai_handler.context_manager.get_current_context()
+                            await event.reply(f"Current context:\n{current_context}")
+                        else:
+                            context_name = args[0].lower()
+                            if self.ai_handler.context_manager.set_context(context_name):
+                                await event.reply(f"Context changed to: {context_name}")
+                            else:
+                                await event.reply(f"Context '{context_name}' not found")
+                    elif command == '/contexts':
+                        contexts = self.ai_handler.context_manager.list_contexts()
+                        await event.reply("Available contexts:\n" + "\n".join(f"- {ctx}" for ctx in contexts))
+                    elif command == '/resetcontext':
+                        self.ai_handler.reset_chat()
+                        await event.reply("Chat reset with current context")
+                    return  # Exit after handling command
+
+                # Only respond in selected group and if responding is enabled
+                if event.chat_id != self.selected_group_id:
+                    return
+
+                if not self.is_responding:
+                    return
 
                 # Get AI response
                 response_data = await self.ai_handler.get_response(message_text, event.chat_id, event.sender_id)

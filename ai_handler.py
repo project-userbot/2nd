@@ -783,7 +783,7 @@ class GeminiHandler:
         """Main method to get AI response"""
         try:
             # Add fixed 5 second delay
-            await asyncio.sleep(140)
+            await asyncio.sleep(50)
             
             # Initialize user state if needed
             await self.initialize_user_state(user_id)
@@ -1818,7 +1818,7 @@ Your task is to engage the group in a thoughtful conversation about {topic}, whi
                     response = await self._generate_response(prompt)
                     if response:
                         await self._send_message(response)
-                    await asyncio.sleep(60)  # Wait for a minute before the next message
+                    await asyncio.sleep(50)  # Wait for a minute before the next message
                 except Exception as e:
                     logging.error(f"Error generating response in topic induction: {str(e)}")
                     continue

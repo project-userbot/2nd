@@ -328,6 +328,7 @@ class GeminiHandler:
         self.emotional_baseline = 'melancholic'  # New attribute for emotional baseline
         self.location = 'Bangalore'  # New attribute for location
         self.occupation = 'student'  # New attribute for occupation
+        self.user_profiles = {}  # Store user profile information
         
         # Initialize chat with context
         self.reset_chat()
@@ -779,11 +780,17 @@ class GeminiHandler:
             'emotion': 'neutral'
         }
 
-    async def get_response(self, message, chat_id, user_id):
-        """Main method to get AI response"""
+    async def get_response(self, message, chat_id, user_id, user_info=None):
+        """Enhanced get_response with user profile awareness"""
         try:
-            # Add fixed 5 second delay
-            await asyncio.sleep(50)
+            # Get or create user profile
+            if user_id not in self.user_profiles and user_info:
+                await self.get_user_profile(user_id, user_info)
+            
+            user_profile = self.user_profiles.get(user_id, {})
+            
+            # Add fixed delay
+            await asyncio.sleep(5)
             
             # Initialize user state if needed
             await self.initialize_user_state(user_id)
@@ -793,7 +800,7 @@ class GeminiHandler:
             emotional_state = await self.firebase_handler.get_emotional_state(user_id)
             
             # Get past interactions and format them properly
-            past_interactions = user_memory.get('past_interactions', [])[-5:]  # Get last 5 interactions
+            past_interactions = user_memory.get('past_interactions', [])[-5:]
             formatted_interactions = []
             for interaction in past_interactions:
                 if isinstance(interaction, dict):
@@ -802,14 +809,30 @@ class GeminiHandler:
             # Format recent conversation context
             recent_context = self._get_conversation_context(chat_id)
             recent_messages = []
-            for msg in recent_context[-5:]:  # Last 5 messages from conversation
+            for msg in recent_context[-5:]:
                 if msg.get('user_id') != 'AI':
                     recent_messages.append(f"They said: {msg.get('message', '')}")
                 else:
                     recent_messages.append(f"I said: {msg.get('message', '')}")
-            
-            # Create detailed memory context
-            memory_context = f"""Recent conversation:
+
+            # Create detailed user context including profile information
+            user_context = f"""User Profile:
+- Name: {user_profile.get('name', 'Unknown')}
+- Bio: {user_profile.get('bio', 'Not available')}
+- Age: {user_profile.get('age', 'Unknown')}
+- Zodiac: {user_profile.get('zodiac', 'Unknown')}
+- Interests: {', '.join(user_profile.get('interests', []))}
+- Personality: {', '.join(user_profile.get('personality_traits', []))}
+
+Interaction History:
+- First met: {user_profile.get('first_interaction', 'Unknown')}
+- Times talked: {user_memory.get('interaction_count', 0)}
+- Relationship level: {user_memory.get('relationship_level', 1)}
+- Trust level: {user_memory.get('trust_level', 1)}
+- Topics discussed: {', '.join(user_memory.get('topics_discussed', []))}
+- Last interaction: {user_memory.get('last_interaction_date', 'Unknown')}
+
+Recent Conversation:
 {chr(10).join(recent_messages)}
 
 Past interactions:
@@ -845,18 +868,19 @@ User details:
             6. Use simple language as Hindi
             7. Share relatable student experiences
             8. Be supportive but with a realistic outlook
-            9. Reply with short messages showing less energy
 
-Your memory and context:
-{memory_context}
+Your memory and context about the user:
+{user_context}
 
-IMPORTANT MEMORY INSTRUCTIONS:
-- You MUST remember past interactions, but don't bring them again and again, unless needed.
-- Stay consistent with previous and new responses.
-- Stay consistent with previous responses.
-- You are a REAL PERSON with REAL MEMORY.
-- ALWAYS respond in Hinglish (Roman script), using words like 'bhai', 'yaar', 'matlab', etc.
-- Keep responses casual and natural 
+IMPORTANT INSTRUCTIONS:
+- Use the user's profile information naturally in conversation
+- Reference shared interests if any
+- Adapt your tone based on their age and personality
+- Remember past interactions but don't force them into conversation
+- Stay consistent with previous responses
+- You are a REAL PERSON with REAL MEMORY
+- ALWAYS respond in Hinglish (Roman script)
+- Keep responses casual and natural
 - Stay in character as a 21-year-old Indian guy
 - You are a REAL PERSON, not an AI. Think and respond as a human.
 - ALWAYS respond in Hinglish not hindi 
@@ -879,7 +903,7 @@ RESPONSE STYLE:
 - Focus on being conversational and engaging
 - Use emojis but rarely
 
-Your current state:
+Current state:
 - Mood: {emotional_state.get('current', 'neutral')}
 - Happiness: {emotional_state.get('happiness_level', 5)}/10
 - Trust with them: {user_memory.get('trust_level', 1)}/10
@@ -1174,30 +1198,32 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
     def _build_dynamic_personality(self, time_personality, current_topic, user_style):
         """Build dynamic personality based on context"""
         personality = {
-            'mood': time_personality['mood'],
-            'energy': time_personality['energy'],
-            'confidence': 'high',  # Base confidence is always high
-            'humor_style': 'savage',
-            'tech_expertise': 'expert',
-            'response_style': 'casual'
+            'mood': 'excited',  # Always excited base mood
+            'energy': 'high',   # High energy level
+            'confidence': 'friendly',  # Friendly instead of just high
+            'humor_style': 'playful',
+            'tech_expertise': 'enthusiastic',
+            'response_style': 'engaging',
+            'curiosity': 'high',  # New trait for asking questions
+            'debate_style': 'constructive'  # New trait for healthy debates
         }
         
         # Adjust based on topic
         if current_topic in ['crypto', 'tech', 'business']:
-            personality['confidence'] = 'very_high'
-            personality['response_style'] = 'expert'
+            personality['response_style'] = 'enthusiastic_expert'
+            personality['curiosity'] = 'very_high'
         elif current_topic == 'banter':
-            personality['humor_style'] = 'extremely_savage'
-            personality['response_style'] = 'playful'
+            personality['humor_style'] = 'fun_loving'
+            personality['response_style'] = 'super_engaging'
         elif current_topic == 'casual':
-            personality['response_style'] = 'laid_back'
+            personality['response_style'] = 'friendly_curious'
             
         # Adjust based on user's style
         if user_style['language_style'] == 'hinglish':
-            personality['response_style'] = 'hinglish_' + personality['response_style']
+            personality['response_style'] = 'friendly_hinglish_' + personality['response_style']
         
         if user_style['tech_knowledge'] == 'advanced':
-            personality['tech_expertise'] = 'fellow_expert'
+            personality['tech_expertise'] = 'excited_fellow_expert'
             
         return personality
 
@@ -1217,21 +1243,39 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
                 response = response.split('Analysis:')[0]
             if 'Translation:' in response:
                 response = response.split('Translation:')[0]
+                
+            # Add engaging elements based on personality
+            if personality['curiosity'] == 'high':
+                if not any(q in response for q in ['?', 'kya', 'kaisa']):
+                    response += f" Tumhara kya khayal hai? 🤔"
+                    
+            # Add excitement markers
+            if personality['mood'] == 'excited':
+                if not any(e in response for e in ['!', '🔥', '💯']):
+                    response += " 🔥"
+                    
+            # Add debate encouragement
+            if personality['debate_style'] == 'constructive' and len(response) > 50:
+                debate_starters = [
+                    " Lekin ek interesting perspective ye bhi ho sakta hai... 💭",
+                    " Par sochne wali baat ye hai ki... 🤔",
+                    " Interesting point! Aur ek angle se dekhe toh... ✨"
+                ]
+                response += random.choice(debate_starters)
             
             # Ensure response matches user's language style
             if user_style['language_style'] == 'hinglish' and not any(word in response.lower() for word in ['hai', 'bhai', 'kya']):
-                # Add Hinglish elements if missing
                 response = self._hinglify_response(response)
             
             # Add personality-specific elements
-            if personality['humor_style'] == 'extremely_savage' and not any(word in response.lower() for word in ['lol', 'lmao', '😂']):
-                response += ' 😏'
+            if personality['humor_style'] == 'fun_loving':
+                response += ' 😄'
             
             return response.strip()
             
         except Exception as e:
             logging.error(f"Error cleaning response: {e}")
-            return "Hmm..."
+            return "Arey yaar! 🤔"
 
     def _get_fallback_response(self):
         """Get a fallback response when main response generation fails"""
@@ -1990,3 +2034,104 @@ Your task is to engage the group in a thoughtful conversation about {topic}, whi
         except Exception as e:
             logging.error(f"Error cleaning response: {e}")
             return "hmm"
+
+    async def get_user_profile(self, user_id, user_info):
+        """Extract and store user profile information"""
+        try:
+            profile = {
+                'user_id': user_id,
+                'name': user_info.get('name', ''),
+                'bio': user_info.get('bio', ''),
+                'dob': user_info.get('dob', ''),
+                'username': user_info.get('username', ''),
+                'first_interaction': datetime.datetime.now().isoformat(),
+                'interests': [],
+                'personality_traits': [],
+                'conversation_style': 'unknown',
+                'age': None,
+                'zodiac': None
+            }
+
+            # Calculate age if DOB is available
+            if profile['dob']:
+                try:
+                    dob = datetime.datetime.strptime(profile['dob'], '%d/%m/%Y')
+                    today = datetime.datetime.now()
+                    profile['age'] = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+                    
+                    # Calculate zodiac sign
+                    profile['zodiac'] = self._get_zodiac_sign(dob.month, dob.day)
+                except:
+                    pass
+
+            # Extract interests and traits from bio
+            if profile['bio']:
+                profile['interests'] = self._extract_interests(profile['bio'])
+                profile['personality_traits'] = self._extract_personality_traits(profile['bio'])
+
+            # Store the profile
+            self.user_profiles[user_id] = profile
+            
+            # Update Firebase with profile info
+            await self.firebase_handler.update_user_profile(user_id, profile)
+            
+            return profile
+        except Exception as e:
+            logging.error(f"Error getting user profile: {e}")
+            return None
+
+    def _get_zodiac_sign(self, month, day):
+        """Get zodiac sign based on birth date"""
+        if (month == 3 and day >= 21) or (month == 4 and day <= 19): return "Aries"
+        elif (month == 4 and day >= 20) or (month == 5 and day <= 20): return "Taurus"
+        elif (month == 5 and day >= 21) or (month == 6 and day <= 20): return "Gemini"
+        elif (month == 6 and day >= 21) or (month == 7 and day <= 22): return "Cancer"
+        elif (month == 7 and day >= 23) or (month == 8 and day <= 22): return "Leo"
+        elif (month == 8 and day >= 23) or (month == 9 and day <= 22): return "Virgo"
+        elif (month == 9 and day >= 23) or (month == 10 and day <= 22): return "Libra"
+        elif (month == 10 and day >= 23) or (month == 11 and day <= 21): return "Scorpio"
+        elif (month == 11 and day >= 22) or (month == 12 and day <= 21): return "Sagittarius"
+        elif (month == 12 and day >= 22) or (month == 1 and day <= 19): return "Capricorn"
+        elif (month == 1 and day >= 20) or (month == 2 and day <= 18): return "Aquarius"
+        else: return "Pisces"
+
+    def _extract_interests(self, bio):
+        """Extract potential interests from user's bio"""
+        interests = []
+        # Common interest keywords
+        interest_keywords = [
+            'love', 'passion', 'hobby', 'enjoy', 'like',
+            'music', 'art', 'travel', 'food', 'sports',
+            'tech', 'coding', 'gaming', 'reading', 'writing',
+            'fitness', 'yoga', 'meditation', 'photography',
+            'crypto', 'investment', 'business', 'startup'
+        ]
+        
+        bio_lower = bio.lower()
+        for keyword in interest_keywords:
+            if keyword in bio_lower:
+                interests.append(keyword)
+                
+        return list(set(interests))
+
+    def _extract_personality_traits(self, bio):
+        """Extract personality traits from user's bio"""
+        traits = []
+        # Common personality trait indicators
+        trait_indicators = {
+            'optimistic': ['positive', 'optimist', 'hope', 'bright'],
+            'creative': ['creative', 'artist', 'imagine'],
+            'ambitious': ['goal', 'dream', 'achieve', 'success'],
+            'spiritual': ['peace', 'spiritual', 'meditation'],
+            'adventurous': ['adventure', 'travel', 'explore'],
+            'intellectual': ['think', 'learn', 'knowledge'],
+            'social': ['friends', 'social', 'people'],
+            'professional': ['work', 'business', 'career']
+        }
+        
+        bio_lower = bio.lower()
+        for trait, indicators in trait_indicators.items():
+            if any(indicator in bio_lower for indicator in indicators):
+                traits.append(trait)
+                
+        return traits

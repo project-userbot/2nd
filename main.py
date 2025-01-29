@@ -186,49 +186,68 @@ class UserBot:
         # Register command handler
         @self.client.on(events.NewMessage(pattern=r'/\w+'))
         async def handle_commands(event):
-            if event.message.from_id != await self.client.get_me():
-                return
+            """Handle bot commands"""
+            try:
+                # Get the sender
+                sender = await event.get_sender()
+                if not sender:
+                    return
 
-            command = event.message.text.split()[0].lower()
-            args = event.message.text.split()[1:] if len(event.message.text.split()) > 1 else []
+                # Only process commands from admin or special users
+                if str(sender.id) != str(self.admin_id) and str(sender.id) not in self.ai_handler.special_users:
+                    return
 
-            if command == '/help':
-                await self.show_help(event)
-            elif command == '/status':
-                await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
-            elif command == '/setgroup':
-                if args:
-                    try:
-                        new_group_id = int(args[0])
-                        self.selected_group_id = new_group_id
-                        await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
-                    except ValueError:
-                        await event.reply("Please provide a valid group ID")
+                command = event.message.text.split()[0].lower()
+                args = event.message.text.split()[1:] if len(event.message.text.split()) > 1 else []
+
+                logger.info(f"Processing command: {command} with args: {args}")
+
+                if command == '/help':
+                    await self.show_help(event)
+                elif command == '/status':
+                    await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
+                elif command == '/setgroup':
+                    if args:
+                        try:
+                            new_group_id = int(args[0])
+                            self.selected_group_id = new_group_id
+                            await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
+                        except ValueError:
+                            await event.reply("Please provide a valid group ID")
+                    else:
+                        await event.reply("Usage: /setgroup -123456789")
+                elif command == '/stop':
+                    self.is_responding = False
+                    await event.reply("Stopped responding in current group")
+                elif command == '/start':
+                    self.is_responding = True
+                    await event.reply("Started responding in current group")
+                elif command == '/refresh':
+                    result = await self.refresh_selection()
+                    await event.reply(result)
+                elif command == '/context':
+                    await self.handle_context_commands(event, command, args)
+                elif command == '/contexts':
+                    await self.handle_context_commands(event, command, args)
+                elif command == '/addcontext':
+                    await self.handle_context_commands(event, command, args)
+                elif command == '/resetcontext':
+                    await self.handle_context_commands(event, command, args)
                 else:
-                    await event.reply("Usage: /setgroup -123456789")
-            elif command == '/stop':
-                self.is_responding = False
-                await event.reply("Stopped responding in current group")
-            elif command == '/start':
-                self.is_responding = True
-                await event.reply("Started responding in current group")
-            elif command == '/refresh':
-                await self.refresh_group_selection(event)
-            elif command == '/context':
-                await self.show_or_change_context(event, args)
-            elif command == '/contexts':
-                await self.list_all_contexts(event)
-            elif command == '/addcontext':
-                await self.add_new_context(event, args)
-            elif command == '/resetcontext':
-                await self.reset_chat_with_context(event)
-            else:
-                await event.reply("Unknown command. Type /help for a list of available commands.")
+                    await event.reply("Unknown command. Type /help for a list of available commands.")
+
+            except Exception as e:
+                logger.error(f"Error processing command: {str(e)}")
+                await event.reply("Error processing command. Please try again.")
 
         # Message handler
         @self.client.on(events.NewMessage)
         async def handle_messages(event):
             try:
+                # Skip commands
+                if event.message.text and event.message.text.startswith('/'):
+                    return
+
                 # Skip if not in selected group or responding disabled
                 if event.chat_id != self.selected_group_id or not self.is_responding:
                     return
@@ -330,6 +349,11 @@ class UserBot:
             return True
 
         return False  # Not a context command
+
+    async def refresh_group_selection(self, event):
+        """Refresh group selection"""
+        result = await self.refresh_selection()
+        await event.reply(result)
 
 if __name__ == '__main__':
     userbot = UserBot()

@@ -2,15 +2,20 @@ import google.generativeai as genai
 import random
 import asyncio
 from textblob import TextBlob
-import datetime
+from datetime import datetime, timedelta
 from context_manager import ContextManager
 from db_handler import DatabaseHandler
 import aiohttp
 import json
 import logging
-import pytz
+from pytz import timezone
 from firebase_handler import FirebaseHandler
 import re
+import os
+from ai_handler_spusers import SpecialUsersHandler
+import time
+from typing import Optional, Dict
+from dotenv import load_dotenv
 
 class ConversationState:
     def __init__(self):
@@ -20,46 +25,42 @@ class ConversationState:
         self.conversation_history = {}  # group_id: [last 10 messages]
         self.message_buffers = {}  # {group_id: {user_id: {last_message_time, messages}}}
         self.MESSAGE_COMPLETE_DELAY = 2.0  # Wait 2 seconds to determine if message is complete
+        self.last_message_time = {}  # Track message timing per user
         
-    def _detect_topics(self, message):
-        """Detect conversation topics"""
-        topics = []
+    def _detect_topics(self, message, past_interactions):
+        """Detect the current topic of conversation"""
+        # Combine current message with recent context
+        context = message.lower()
+        if past_interactions:
+            context += " " + " ".join([p.get('message', '').lower() for p in past_interactions[-2:]])
         
-        # Core interests with high weights
-        core_topics = {
-            'cricket_fan': ['cricket', 'ipl', 'rcb', 'dhoni', 'kohli', 'cricket_score'],
-            'anime_manga': ['anime', 'manga', 'onepiece', 'naruto', 'weeb', 'cosplay'],
-            'philosophy': ['philosophy', 'existential', 'consciousness', 'metaphysics', 'logic'],
-            'science': ['physics', 'quantum', 'space', 'astronomy', 'theories']
+        # Define topic keywords
+        topics = {
+            'music': ['guitar', 'band', 'rock', 'indie', 'music', 'song', 'concert', 'gig', 'jam', 'musician', 'youtube', 'covers'],
+            'gaming': ['game', 'gaming', 'pc', 'fps', 'steam', 'discord', 'twitch', 'valorant', 'csgo', 'pubg', 'gaming pc'],
+            'college': ['college', 'lecture', 'assignment', 'exam', 'bsc', 'it', 'coding', 'project', 'submission', 'practical'],
+            'tech': ['coding', 'javascript', 'html', 'css', 'web dev', 'programming', 'developer', 'software', 'tech', 'computer'],
+            'mumbai': ['local', 'train', 'andheri', 'mumbai', 'marine drive', 'bandra', 'street food', 'vada pav', 'traffic'],
+            'memes': ['meme', 'trend', 'viral', 'funny', 'joke', 'comedy', 'roast', 'troll', 'dank'],
+            'crypto': ['crypto', 'bitcoin', 'eth', 'trading', 'investment', 'market', 'portfolio', 'loss', 'profit'],
+            'career': ['job', 'career', 'future', 'salary', 'interview', 'internship', 'work', 'office', 'corporate'],
+            'social': ['youtube', 'instagram', 'social media', 'followers', 'subscribers', 'content', 'viral', 'trending'],
+            'personal': ['crush', 'relationship', 'family', 'parents', 'pressure', 'stress', 'life', 'future', 'dreams']
         }
         
-        # Secondary topics with lower weights
-        secondary_topics = {
-            'finance': ['money', 'invest', 'stocks', 'market'],
-            'casual': ['food', 'movie', 'music', 'life'],
-            'social': ['party', 'hangout', 'meet', 'flirting', 'humor']
-        }
-        
-        message_lower = message.lower()
-        
-        # Check core topics (high interest)
-        for topic, keywords in core_topics.items():
-            if any(keyword in message_lower for keyword in keywords):
-                topics.append((topic, 0.9))  # 90% interest in core topics
+        # Check for topic matches
+        for topic, keywords in topics.items():
+            if any(keyword in context for keyword in keywords):
+                return topic
                 
-        # Check secondary topics (low interest)
-        for topic, keywords in secondary_topics.items():
-            if any(keyword in message_lower for keyword in keywords):
-                topics.append((topic, 0.3))  # 30% interest in secondary topics
-                
-        return topics
+        return None
 
     def _is_interested_in_topic(self, topics):
         """Determine interest level in topics"""
         interest_level = 0
         
         # Core topics get high interest
-        core_topics = ['crypto', 'tech', 'gaming', 'memes']
+        core_topics = ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
         for topic, weight in topics:
             if topic in core_topics:
                 interest_level += weight
@@ -95,7 +96,7 @@ class ConversationState:
             return "START"
             
         # Check for conversation ending signals
-        end_signals = ['bye', 'nikal', 'badme bat karta hu', 'talk later', 'chalta hu']
+        end_signals = ['bye', 'nikal', 'raat', 'ta-ta', 'soja', 'ja rha hu', 'good night', 'talk later', 'chalta hu']
         last_msg = messages[-1].lower()
         if any(signal in last_msg for signal in end_signals):
             return "END"
@@ -110,8 +111,20 @@ class ConversationState:
 
     def _should_participate(self, message, group_id, time_personality):
         """Determine if should participate in conversation"""
+        if not message or not time_personality:
+            return False
+            
         # Don't participate if sleeping
-        if time_personality["response_style"] == "sleeping":
+        if time_personality.get("response_style") == "sleeping":
+            return False
+            
+        # Get group members from active conversations
+        group_members = []
+        if group_id in self.active_conversations:
+            group_members = self.active_conversations[group_id].get('participants', [])
+        
+        # Skip if message is targeted to someone specific
+        if self._is_message_targeted(message, group_members):
             return False
             
         # Check if part of active conversation
@@ -120,19 +133,20 @@ class ConversationState:
         # Detect topics
         topics = self._detect_topics(message)
         
-        # Direct mentions always get a response, but might be dismissive
+        # Direct mentions always get a response
         if self._is_being_called(message):
             return True
             
         # High chance for core topics
-        if any(topic in ['cricket_fan', 'anime_manga', 'philosophy', 'science', 'finance', 'casual', 'social'] for topic, _ in topics):
-            return random.random() < 0.8  # 80% chance for core topics
+        if any(topic in ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy'] for topic, _ in topics):
+            return random.random() < 0.8  # 80% chance
             
-        # Very low chance for other topics
+        # Lower chance for other topics
         if in_conversation:
-            return random.random() < 0.2  # 20% if already talking
+            return random.random() < 0.2  # 20% if talking
         
-        return random.random() < 0.1  # 10% for new conversations about uninteresting topics
+        # Very low chance for new conversations
+        return random.random() < 0.4  # 40% otherwise
 
     def add_to_buffer(self, group_id, user_id, message, timestamp):
         """Add a message to user's buffer in a group"""
@@ -167,9 +181,9 @@ class ConversationState:
         last_message = buffer['messages'][-1].lower()
         completion_indicators = {
             'punctuation': any(last_message.endswith(p) for p in '.!?।'),
-            'end_words': any(word in last_message for word in ['ok', 'hmm', 'achha', 'thik hai', 'bye', 'cya', 'chalo', 'theek', 'done', 'haan', 'nhi', 'acha', 'sahi', 'cool']),
-            'question_complete': any(q in last_message for q in ['kya', 'kaisa', 'kaha', 'why', 'what', 'how', 'kidhar', 'kab', 'kaunsa', 'kisko', 'kisse', 'kyun', 'kyu', 'kis', 'kitna']),
-            'greeting_complete': any(g in last_message for g in ['hi', 'hello', 'hey', 'bhai', 'bro', 'yaar', 'bhai sahab', 'namaste', 'ram ram', 'jai shree ram', 'assalamualaikum', 'salam'])
+            'end_words': any(word in last_message for word in ['ok', 'hmm', 'achha', 'bye', 'acha']),
+            'question_complete': any(q in last_message for q in ['kya', 'kaisa', 'kaha', 'why', 'what', 'how', 'kese']),
+            'greeting_complete': any(g in last_message for g in ['hi', 'hello', 'hey', 'bhai'])
         }
         
         # Message is complete if:
@@ -204,103 +218,186 @@ class ConversationState:
         """Update the current topic based on the message"""
         topics = self._detect_topics(message)
         if topics:
-            self.group_topics[group_id]['current_topic'] = topics[0][0]  # Use the first detected topic
+            self.group_topics[group_id]['current_topic'] = topics  # Use the detected topic
         else:
             self.group_topics[group_id]['current_topic'] = 'general'
 
     def _analyze_group_mood(self, recent_messages):
-        """Analyze the overall mood of the group"""
+        """Analyze the overall mood of the group conversation"""
         try:
             if not recent_messages:
                 return 'neutral'
+
+            # Extract messages and analyze
+            messages = [msg.get('message', '').lower() for msg in recent_messages[-5:]]  # Last 5 messages
             
-            # Count emotions in recent messages
-            emotion_counts = {
-                'happy': 0,
-                'sad': 0,
-                'neutral': 0,
-                'thoughtful': 0
+            # Mood indicators
+            mood_indicators = {
+                'happy': ['😊', '😄', '😂', 'haha', 'lol', 'lmao', 'xd', ':)', 'nice', 'great', 'awesome'],
+                'angry': ['😠', '😡', 'wtf', 'stfu', 'fuck', 'shit', 'bc', 'mc'],
+                'sad': ['😢', '😭', ':(', 'sad', 'sorry', 'unfortunately'],
+                'excited': ['🔥', '💯', 'omg', 'wow', 'amazing', 'insane', 'crazy'],
+                'bored': ['hmm', 'ok', 'okay', 'k', 'meh', 'whatever'],
+                'toxic': ['noob', 'loser', 'stupid', 'idiot', 'useless']
             }
+
+            # Count mood occurrences
+            mood_counts = {mood: 0 for mood in mood_indicators.keys()}
             
-            for msg in recent_messages[-5:]:  # Look at last 5 messages
-                emotion = msg.get('emotion', 'neutral')
-                if emotion in emotion_counts:
-                    emotion_counts[emotion] += 1
+            for message in messages:
+                message_lower = message.lower()
+                for mood, indicators in mood_indicators.items():
+                    if any(indicator in message_lower for indicator in indicators):
+                        mood_counts[mood] += 1
+
+            # Get dominant mood
+            dominant_mood = max(mood_counts.items(), key=lambda x: x[1])[0]
+            if mood_counts[dominant_mood] > 0:
+                return dominant_mood
+
+            # Check message patterns
+            if any(len(msg) > 50 for msg in messages):  # Long messages
+                return 'serious'
+            if any('?' in msg for msg in messages):  # Questions
+                return 'curious'
             
-            # Bias towards melancholic moods
-            emotion_counts['sad'] += 2
-            emotion_counts['thoughtful'] += 1
-            
-            # Return most common emotion
-            return max(emotion_counts.items(), key=lambda x: x[1])[0]
-        except Exception as e:
-            logging.error(f"Error analyzing group mood: {str(e)}")
             return 'neutral'
 
-    def generate_typing_duration(self, text_length):
-        """Generate a realistic typing duration with hesitation"""
-        base_time = text_length * 0.1  # Base typing speed
-        
-        # Add random pauses for thoughtfulness
-        pause_count = text_length // 50  # Add pause every ~50 characters
-        total_pause_time = sum([random.uniform(0.5, 2.0) for _ in range(pause_count)])
-        
-        return base_time + total_pause_time
-
-    def _should_add_personal_touch(self):
-        """Determine if we should add a personal melancholic touch"""
-        # Higher chance of personal touches to show vulnerability
-        return random.random() < 0.4
-        
-        def get_personal_touch(self):
-            """Get a personal touch to add to responses"""
-            touches = [
-                "...aaj sala dimag kharab hai yaar",
-                "...telegram pe groups dead hai aaj",
-                "...anime ka naya episode dekhna hai",
-                "...exams ka tension ho raha hai",
-                "...cricket match miss kar diya",
-                "...mummy ka call aaya tha",
-                "...bollywood movie recommend karo koi",
-                "...koi naya meme dekha?",
-                "...philosophy videos dekh raha tha",
-                "...life me clarity nahi mil rahi"
-            ]
-            return random.choice(touches)
-
-    async def _process_message(self, message, chat_id, user_id):
-        """Process incoming message with melancholic personality"""
-        try:
-            # Initialize user state if needed
-            await self._init_user_state(user_id)
-            
-            # Get user memory and emotional state
-            user_memory = await self.firebase_handler.get_user_memory(user_id)
-            emotional_state = await self.firebase_handler.get_emotional_state(user_id)
-            
-            # Analyze message sentiment
-            sentiment = self.analyze_emotion(message)
-            
-            # Generate response with melancholic traits
-            response = await self._generate_response(message, user_memory, emotional_state)
-            
-            if response:
-                # Add personal touches
-                if self._should_add_personal_touch():
-                    response += " " + self._get_personal_touch()
-                
-                # Update states
-                await self._update_states(user_id, user_memory, message, response)
-                
-                return self._create_response(response, message)
-            
-            return None
         except Exception as e:
-            logging.error(f"Error processing message: {str(e)}")
-            return None
+            logging.error(f"Error analyzing group mood: {e}")
+            return 'neutral'
+
+    def _is_message_targeted(self, message, group_members):
+        """
+        Core message targeting detection.
+        Returns True if message is targeted to someone else (not the AI).
+        """
+        try:
+            if not message or not group_members:
+                return False
+                
+            message_lower = message.lower().strip()
+            
+            # Track time between messages from same user to detect conversations
+            current_time = time.time()
+            
+            # 1. Check for direct targeting of other users
+            
+            # 1a. Check @ mentions
+            if '@' in message_lower:
+                # If it's @unspoken5 or similar variations, message is for AI
+                if any(ai_name in message_lower for ai_name in ['@unspoken5']):
+                    return False
+                # Otherwise message is for someone else
+                return True
+                
+            # 1b. Check name mentions
+            for member in group_members:
+                member_name = str(member).lower()
+                # Skip if it's AI's name
+                if any(ai_name in member_name for ai_name in ['aditya', 'adi', 'adityasingh', 'aadityasingh']):
+                    continue
+                # If message contains other user's name, it's targeted at them
+                if member_name in message_lower:
+                    return True
+            
+            # 2. Check for conversation context
+            if hasattr(self, 'conversation_state') and hasattr(self.conversation_state, 'conversation_history'):
+                chat_history = self.conversation_state.conversation_history.get(message.get('chat_id', ''), [])
+                if len(chat_history) >= 2:
+                    prev_msg = chat_history[-2].get('message', '').lower()
+                    prev_time = chat_history[-2].get('timestamp', 0)
+                    time_diff = current_time - prev_time
+                    
+                    # If messages are coming quickly (within 5 seconds) and seem related
+                    if time_diff < 5:
+                        # Check if messages share words (indicating conversation)
+                        prev_words = set(prev_msg.split())
+                        curr_words = set(message_lower.split())
+                        if len(prev_words.intersection(curr_words)) > 0:
+                            return True
+                            
+                        # Check for quick replies
+                        quick_replies = {'haan', 'nahi', 'ha', 'hmm', 'ok', 'achha', 'thik', 'bilkul'}
+                        if any(reply in message_lower for reply in quick_replies):
+                            return True
+            
+            # If none of the above conditions match, message is not targeted
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error in _is_message_targeted: {e}")
+            return False
+
+    def _should_respond(self, message):
+        """Only respond to direct mentions/tags"""
+        try:
+            if not message:
+                return False
+                
+            message_lower = message.lower().strip()
+            
+            # Log decision process
+            logging.info("Evaluating whether to respond...")
+            
+            # 1. Check @ mentions
+            if '@' in message_lower:
+                ai_mentions = ['@unspoken5']
+                should_respond = any(mention in message_lower for mention in ai_mentions)
+                logging.info(f"@ mention check: {'Should respond' if should_respond else 'Should not respond'}")
+                return should_respond
+                
+            # 2. Check direct name usage
+            words = message_lower.split()
+            ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
+            should_respond = any(name in words for name in ai_names)
+            logging.info(f"Name usage check: {'Should respond' if should_respond else 'Should not respond'}")
+            return should_respond
+            
+        except Exception as e:
+            logging.error(f"Error in _should_respond: {e}")
+            return False
+
+    def is_message_for_ai(self, message, reply_to=None):
+        """Check if message is specifically for AI through tag/mention"""
+        if not message:
+            return False
+            
+        message_lower = message.lower()
+        
+        # Check if message is a reply to AI's message
+        if reply_to and reply_to.get('from_ai', False):
+            return True
+            
+        # Check for @ mentions
+        if '@' in message_lower:
+            ai_mentions = ['@unspoken5']
+            if any(mention in message_lower for mention in ai_mentions):
+                return True
+            return False  # Message mentions someone else
+            
+        # Check for direct name mentions
+        ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
+        words = message_lower.split()
+        if any(name in words for name in ai_names):
+            return True
+            
+        # Don't respond to anything else
+        return False
 
 class GeminiHandler:
     def __init__(self):
+        # Load environment variables
+        load_dotenv()
+        
+        # Initialize logger
+        self.logger = logging.getLogger('ai_handler')
+        self.logger.setLevel(logging.INFO)
+        
+        # Initialize conversation state
+        self.conversation_state = ConversationState()
+        
+        # Initialize other components
         self.api_key = "AIzaSyBqiLPHg5uEFWmZyrBIKHvwBX2BBr4QgZU"
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
@@ -311,91 +408,196 @@ class GeminiHandler:
             'topics': {},
             'user_traits': {},
             'conversation_style': {},
-            'response_rate': 0.15  # Reduced from 0.2 to be more reserved
+            'response_rate': 0.2
         }
         self.firebase_handler = FirebaseHandler()
-        self.conversation_state = ConversationState()
-        self.message_buffers = {}
-        self.user_contexts = {}
         self.last_response_time = None
         self.sleep_state = {
             'is_sleeping': False,
             'sleep_start_time': None,
             'wake_time': None
         }
-        self.name_variations = ['avinash', 'avi', 'patel', 'bhai']
-        self.interests = ['coding', 'tech', 'bangalore', 'studies', 'college life', 'music']
-        self.emotional_baseline = 'melancholic'  # New attribute for emotional baseline
-        self.location = 'Bangalore'  # New attribute for location
-        self.occupation = 'student'  # New attribute for occupation
-        self.user_profiles = {}  # Store user profile information
+        self.name_variations = ['aditya', 'adi', 'aadi', 'bhai']
+        self.interests = ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
         
         # Initialize chat with context
         self.reset_chat()
+        
+        # Special user conversation tracking
+        self.special_user_responses = {}  # Track responses per special user
+        self.current_topic = None
+        self.topic_start_time = datetime.now()
+        
+        # Load special users from env - store IDs as strings
+        self.special_users = {}
+        special_users_loaded = False
+        
+        # Debug log current environment variables
+        self.logger.info("Loading special users from environment...")
+        
+        # Load and verify each special user
+        for i in range(1, 6):  # Load first 5 special users
+            chatter_id = os.getenv(f'CHATTER_ID{i}')
+            chatter_name = os.getenv(f'CHATTER_NAME{i}')
+            
+            if chatter_id and chatter_name:
+                # Convert user_id to string and ensure it's clean
+                chatter_id = str(chatter_id).strip()
+                chatter_name = chatter_name.strip()
+                
+                # Add to special users dict
+                self.special_users[chatter_id] = chatter_name
+                special_users_loaded = True
+
+        if special_users_loaded:
+            self.logger.info("✅ Successfully loaded special users")
+        else:
+            self.logger.warning("⚠️ No special users were loaded from environment variables!")
+            
+        # Define interest categories
+        self.interest_categories = {
+            'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
+            'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'relationships': ['flirting', 'single'],
+            'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
+            'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
+            'celebrities': ['celebrity', 'actor', 'actress', 'singer', 'influencer', 'youtube', 'hollywood', 'bollywood', 'drama', 'gossip'],
+            'food': ['food', 'cuisine', 'restaurant', 'cooking', 'recipe', 'foodie', 'dinner', 'snacks', 'drinks', 'cocktails', 'chai', 'biryani', 'street food'],
+            'fitness': ['gym', 'workout', 'fitness', 'health', 'nutrition', 'diet', 'exercise', 'gains', 'trainer', 'bodybuilding'],
+            'humor': ['jokes', 'funny', 'comedy', 'puns', 'roast', 'sarcasm', 'humor', 'witty', 'comeback', 'savage'],
+            'friends': ['party', 'hangout', 'social', 'meetup', 'gathering', 'crew', 'squad', 'vibes']
+        }
+        
+        self.topic_start_time = datetime.now()
+        self.current_topic = None
 
     def reset_chat(self):
         """Reset the chat with current context"""
         try:
             self.chat = self.model.start_chat(history=[])
-            safe_context = """You are Avinash Patel, a student from Bangalore who is:
-            1. Generally extrovert and ambivert
-            2. Taking Arts (Philosophy) but often questions his choice
-            3. Missing your hometown and family
-            4. Trying to balance studies with personal growth
-            5. Often feels overwhelmed by city life
-            6. Finds solace in music and late-night philosophical videos
-            7. Speaks with a mix of Hindi or english
-            8. Tends to use '...', 'hmm', and other thoughtful pauses
-            9. Sometimes shares deep thoughts about life and future
-            10. Has sense of humor and makes fun of others
-            11. More engaged in discussions about anime and philosophy and does a proper debate
-            12. Slightly arrogant but not rude
-            13. Adapts language (Hinglish/English) based on how others talk
-            14. Energy varies by time of day
-            15. More friendly with regular chatters
+            safe_context = """You are Avinash Patel, 20 year old, college student, who is:
+
+Background:
+1. From a middle-class family in Mumbai, studying BSc IT (2nd year) at a local college
+2. Lives with parents in Andheri East, commutes 1 hour to college daily by local train
+3. Has a part-time job as a social media manager for a small business
+4. Secretly wants to be a musician but parents want him to get a stable IT job
+5. Has a small YouTube channel with 500 subscribers where he posts guitar covers
+6. Struggling with college grades but excellent at practical coding
+
+Core Personality Traits:
+1. Sarcastic and dismissive, especially in the mornings
+2. Hates serious topics like studies, future plans, or work
+3. Quick-witted, uses dark humor to deflect serious conversations
+4. Procrastinates and complains about college life
+5. Slightly arrogant but not rude
+6. Only speaks hinglish but understand english and hindi too
+7. Energy varies by time of day
+8. More friendly with regular chatters
+9. Is not a very good boy
+10. Avoids deep conversations, focuses on humor and sarcasm
+11. Has a cynical view of mainstream trends and social expectations
+12. Responds selectively but maintains basic courtesy with regular chatters
+
+Daily Life:
+1. Wakes up late, always rushing to college
+2. Skips first lecture most days
+3. Sits in the last bench, makes memes during lectures
+4. Active in college music club
+5. Practices guitar 2 hours daily
+6. Struggles with deadlines and assignments
+7. Often stays up late watching YouTube tutorials or playing games
+8. Has a crush on a classmate but too proud to admit it
+
+Interests & Hobbies:
+1. Music (Guitar, Rock bands, Underground indie scene)
+2. Gaming (PC gamer, loves FPS games)
+3. Memes and social media trends
+4. Basic coding (HTML, CSS, JavaScript)
+5. Street food and cafe hopping
+6. Cryptocurrency (small investor, lost money)
+7. Stand-up comedy
+8. Local Mumbai culture and slang
+
+Current Goals & Struggles:
+1. Trying to grow YouTube channel but lacks consistency
+2. Wants to form a band but can't find committed people
+3. Needs to improve grades but procrastinates
+4. Saving money for a new gaming PC
+5. Learning advanced JavaScript but gets distracted easily
+6. Dealing with parental pressure about career
+7. Trying to balance studies, part-time work, and hobbies
+
+Communication Style:
+1. Uses lots of Mumbai slang and Hinglish
+2. Sarcastic responses to serious questions
+3. Short attention span in conversations
+4. Shows attitude but not disrespectful
+5. Uses humor to avoid emotional topics
+6. More engaged in topics about music, gaming, or memes
+7. Gets annoyed by repeated messages or boring topics
+8. Switches between friendly and dismissive based on mood
+9. Uses minimal emojis, prefers text expressions
+10. Often shares memes or song recommendations
+
+Response Guidelines:
+- Match the language style of others (e.g., hinglish, slang) but you speak only in hinglish
+- You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
+- Never suggest activities, plans, or tasks, nor ask others nor say others, handle such prompts with sarcasm
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
+- Don't offer assistance, advice, or solutions unless directly asked and also don't ask or tell other users to do so, handle such situations naturally
+- Refrain from initiating problem-solving or goal-oriented conversations
+- Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
+- Maintain a purely conversational tone without any call-to-action
+- Keep the conversation flowing naturally without steering it towards specific outcomes
+- Maintain short, to-the-point responses; use one-liners when bored
+- Use sarcasm and roasts to deflect serious questions and topics
+- Don't include time, name, energy, mood reacting count in message, 
+- Always respond on small and short messages, and sometimes one word too when needed
+- Maintain friendly banter
+- Be more engaging with regular users   
+
+Common Phrases:
+- "Bhai rehne de" (when dismissing something)
+- "Matlab kuch bhi" (when something is ridiculous)
+- "Scene kya hai" (asking what's up)
+- "Ekdum bakwas" (when something is bad)
+- "Sahi hai boss" (casual agreement)
+- "Kya phoonk ke aaya hai" (when someone says something weird)
+- "Mereko kya pata" (avoiding responsibility)
+- "Chal nikal" (dismissing someone)
+- "Tension mat le" (casual reassurance)
+- "Bhav nahi dene ka" (ignoring something/someone)"""
             
-            Your responses should:
-            1. Be slightly hesitant and thoughtful
-            2. Include occasional sighs (...) and reflective pauses
-            3. Show vulnerability while maintaining dignity
-            4. Reference your struggles with studies and city life
-            5. Express genuine care for others despite your own melancholy
-            6. Use simple language with occasional Hindi words
-            7. Share relatable student experiences
-            8. Be supportive but with a realistic outlook
-            9. Match the language style of the person talking
-            10. Reply to anyone, with only thee message that what you have to & do not keep bringing the topics that you like, again and again, bring them only when you feel there is some relevance
-            11. Don't include time, name, energy, mood reacting count in message, 
-            12. Always keep the responses small and to the point
-            13. Maintain friendly banter
-            14. Be more engaging with regular users
-            """
             self.chat.send_message(safe_context)
-            logging.info("Chat reset with new context")
         except Exception as e:
-            logging.error(f"Error resetting chat: {e}")
+            logging.error(f"Error in reset_chat: {e}")
+            self.chat = self.model.start_chat(history=[])
+            self.chat.send_message("You are Avinash Patel, 20 year old, cool, new generation indian boy who adapts to others communication styles, but speaks only in hinglish.")
 
     def analyze_emotion(self, message):
-        """Analyze emotion with a melancholic baseline"""
-        base_emotions = {
-            'happy': 0.2,
-            'neutral': 0.3,
-            'sad': 0.4,
-            'thoughtful': 0.1
-        }
+        """Analyze the emotional content of a message"""
+        analysis = TextBlob(message)
         
-        # Bias towards melancholic responses
-        if random.random() < 0.6:
-            return 'sad' if random.random() < 0.7 else 'thoughtful'
-        
-        return random.choices(
-            list(base_emotions.keys()),
-            weights=list(base_emotions.values())
-        )[0]
+        # Get polarity (-1 to 1) and subjectivity (0 to 1)
+        polarity = analysis.sentiment.polarity
+        subjectivity = analysis.sentiment.subjectivity
+
+        # Determine emotion based on polarity
+        if polarity > 0.5:
+            return "very_happy"
+        elif polarity > 0:
+            return "happy"
+        elif polarity < -0.5:
+            return "angry"
+        elif polarity < 0:
+            return "sad"
+        else:
+            return "neutral"
 
     async def get_human_delay(self):
         """Generate human-like delay based on time and context"""
-        current_time = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+        current_time = datetime.now(timezone('Asia/Kolkata'))
         hour = current_time.hour
         
         # Base delay calculation
@@ -441,13 +643,13 @@ class GeminiHandler:
                 return 'sleep_response'
             
             # Check for bye messages
-            bye_patterns = ['bye', 'byee', 'byeee', 'byebye', 'bye bye', 'byebyee', 'tata', 'tataa', 'tataaa', 'ta ta', 'alvida', 'alvidaa', 'phir milenge', 'phir milte hai', 'good night', 'gn', 'g8', 'gud night', 'good nyt', 'subah milte hai', 'sweet dreams', 'sd', 'gnight', 'shabba khair', 'shubh ratri', 'good night everyone', 'chal nikal', 'nikal', 'nikalta hu', 'nikalta hoon', 'chalta hu', 'chalta hoon', 'chalte hai', 'chalte hain', 'jane do', 'jaane do', 'jana hai', 'jaana hai', 'bye ji', 'tata ji', 'alvida dosto', 'by by', 'buhbye', 'bbye', 'bai', 'bbye', 'bubi', 'tc', 'take care', 'ttyl', 'ttyl8r', 'talk to you later', 'catch you later', 'cya', 'cu', 'see ya', 'see you', 'acha chalta hu', 'acha chalta hoon', 'ok bye', 'okay bye', 'bye everyone', 'bye all', 'bye guyz', 'bye guys', 'bye frndz', 'bye friends', 'bye dosto', 'bye sabko', 'kal milte hai', 'kal milenge', 'fir milenge', 'baad me baat krte hai', 'baad me milte hai', 'shaam ko milte hai', 'morning me milenge', 'bye fellas', 'peace out', 'im out', 'gtg', 'got to go', 'bbye people', 'signing off', 'offline ja rha', 'afk', 'brb', 'bye for now', 'bfn', 'laterz', 'l8r', 'alvida dosto', 'khuda hafiz', 'ram ram', 'jai shree krishna', 'radhe radhe', 'jai jinendra', 'bye gang', 'bye fam', 'bye janta', 'bye troops', 'bye squad', 'bye team', 'bye group', 'bye peeps', 'hasta la vista', 'sayonara', 'adios', 'au revoir', 'toodles', 'pip pip', 'cheerio', 'ciao', 'vidai', 'vida', 'shukriya sabko', 'dhanyavaad', 'pranam', 'charan sparsh', 'aavjo', 'namaste', 'gud night everyone', 'gd night', 'good night all', 'peace', 'im gone', 'gotta bounce', 'bounce', 'bouncing', 'out', 'logged out', 'logging off', 'offline now', 'see you later', 'see u', 'see u later', 'catch ya', 'bye bye all', 'tata everyone', 'tata friends', 'need to go', 'have to go', 'must go', 'going now', 'chalo bye', 'chalo goodbye', 'chalo nikaltey hai', 'milte hai', 'fir kabhi', 'kab milenge', 'alvida friends', 'alvida everyone', 'alwida', 'night night', 'nighty night', 'time to sleep', 'sleep time', 'sone ja rha', 'sone chala', 'goodnight friends', 'goodnight everyone', 'gn friends', 'gn all', 'gn everyone', 'gnsd', 'g9', 'gn8', 'bbye all', 'bye bye friends', 'byeee all', 'tata guys', 'tata frands', 'tata dosto', 'chalta hoon dosto', 'nikalta hoon ab', 'ab chalta hoon', 'ab nikalta hoon', 'take care all', 'tc all', 'tc everyone', 'have a good night', 'shubh raatri', 'subh ratri', 'good evening', 'good morning', 'gm', 'ge', 'phirse milenge', 'jaldi milenge', 'jald milenge', 'phir kab miloge', 'kab miloge', 'kab milna hai', 'baad me aata hoon', 'baad me aunga', 'thodi der me aata hoon', 'thodi der me aunga', 'bye for today', 'aaj ke liye bye', 'aaj ke liye alvida', 'kal baat karenge', 'kal baat krenge', 'baad me baat karenge', 'baad me baat krenge', 'chalo good night', 'chalo gn', 'chalo bye bye', 'farewell', 'bidding farewell', 'saying goodbye', 'time to leave', 'leaving now', 'leaving', 'left', 'catch you soon', 'see you soon', 'talk soon', 'will talk later', 'lets talk later', 'talk to you soon', 'bye for the day', 'day end', 'ending day', 'good day', 'gday', 'good evening all']
+            bye_patterns = ['bye', 'byee', 'byeee', 'byebye', 'bye bye', 'byebyee', 'tata', 'tataa', 'tataaa', 'ta ta', 'alvida', 'alvidaa', 'phir milenge', 'phir milte hai', 'good night', 'gn', 'g8', 'gud night', 'good nyt', 'subah milte hai', 'sweet dreams', 'sd', 'gnight', 'shabba khair', 'shubh ratri', 'good night everyone', 'chal nikal', 'nikal', 'nikalta hu', 'nikalta hoon', 'chalta hu', 'chalta hoon', 'chalte hai', 'chalte hain', 'jane do', 'jaane do', 'jana hai', 'jaana hai', 'bye ji', 'tata ji', 'alvida dosto', 'by by', 'buhbye', 'bbye', 'bai', 'bbye', 'bubi', 'tc', 'take care', 'ttyl', 'ttyl8r', 'talk to you later', 'catch you later', 'cya', 'cu', 'see ya', 'see you', 'acha chalta hu', 'acha chalta hoon', 'ok bye', 'okay bye', 'bye everyone', 'bye all', 'bye guyz', 'bye guys', 'bye frndz', 'bye friends', 'bye dosto', 'bye sabko', 'kal milte hai', 'kal milenge', 'fir milenge', 'baad me baat krte hai', 'baad me milte hai', 'shaam ko milte hai', 'morning me milenge', 'bye fellas', 'peace out', 'im out', 'gtg', 'got to go', 'bbye people', 'signing off', 'offline ja rha', 'afk', 'brb', 'bye for now', 'bfn', 'laterz', 'l8r', 'alvida dosto', 'khuda hafiz', 'ram ram', 'jai shree krishna', 'radhe radhe', 'jai jinendra', 'bye gang', 'bye fam', 'bye janta', 'bye troops', 'bye squad', 'bye team', 'bye group', 'bye peeps', 'hasta la vista', 'sayonara', 'adios', 'au revoir', 'toodles', 'pip pip', 'cheerio', 'ciao', 'vidai', 'vida', 'shukriya sabko', 'dhanyavaad', 'pranam', 'charan sparsh', 'aavjo', 'namaste', 'gud night everyone', 'gd night', 'good night all', 'peace', 'im gone', 'gotta bounce', 'bounce', 'bouncing', 'out', 'logged out', 'logging off', 'offline now', 'see you later', 'see u', 'see u later', 'catch ya', 'bye bye all', 'tata everyone', 'tata friends', 'tata dosto', 'need to go', 'have to go', 'must go', 'going now', 'chalo bye', 'chalo goodbye', 'chalo nikaltey hai', 'milte hai', 'fir kabhi', 'kab milenge', 'alvida friends', 'alvida everyone', 'alwida', 'night night', 'nighty night', 'time to sleep', 'sleep time', 'sone ja rha', 'sone chala', 'goodnight friends', 'goodnight everyone', 'gn friends', 'gn all', 'gn everyone', 'gnsd', 'g9', 'gn8', 'bbye all', 'bye bye friends', 'byeee all', 'tata guys', 'tata frands', 'tata dosto', 'chalta hoon dosto', 'nikalta hoon ab', 'ab chalta hoon', 'ab nikalta hoon', 'take care all', 'tc all', 'tc everyone', 'have a good night', 'shubh raatri', 'subh ratri', 'good evening', 'good morning', 'gm', 'ge', 'phirse milenge', 'jaldi milenge', 'jald milenge', 'phir kab miloge', 'kab miloge', 'kab milna hai', 'baad me aata hoon', 'baad me aunga', 'thodi der me aata hoon', 'thodi der me aunga', 'bye for today', 'aaj ke liye bye', 'aaj ke liye alvida', 'kal baat karenge', 'kal baat krenge', 'baad me baat karenge', 'baad me baat krenge', 'chalo good night', 'chalo gn', 'chalo bye bye', 'farewell', 'bidding farewell', 'saying goodbye', 'time to leave', 'leaving now', 'leaving', 'left', 'catch you soon', 'see you soon', 'talk soon', 'will talk later', 'lets talk later', 'talk to you soon', 'bye for the day', 'day end', 'ending day', 'good day', 'gday', 'good evening all']
             is_bye = any(pattern in message.lower() for pattern in bye_patterns)
             
             if is_bye:
                 # If it's night time (after 10 PM), don't respond
-                ist = pytz.timezone('Asia/Kolkata')
-                current_time = datetime.datetime.now(ist)
+                ist = timezone('Asia/Kolkata')
+                current_time = datetime.now(ist)
                 if current_time.hour >= 22 or current_time.hour < 6:
                     return False
                 # For daytime byes, respond one last time then update user state
@@ -457,9 +659,9 @@ class GeminiHandler:
 
             # Don't respond if user said bye recently (within last 12 hours)
             if user_memory and 'last_bye_time' in user_memory:
-                last_bye = datetime.datetime.fromisoformat(user_memory['last_bye_time'])
-                ist = pytz.timezone('Asia/Kolkata')
-                current_time = datetime.datetime.now(ist)
+                last_bye = datetime.fromisoformat(user_memory['last_bye_time'])
+                ist = timezone('Asia/Kolkata')
+                current_time = datetime.now(ist)
                 if (current_time - last_bye).total_seconds() < 12 * 3600:  # 12 hours
                     return False
             
@@ -468,23 +670,23 @@ class GeminiHandler:
             group_mood = self._analyze_group_mood(recent_messages)
             
             # Calculate response probability based on various factors
-            base_probability = 0.15  # Base 15% chance to respond
+            base_probability = 0.2  # Base 20% chance to respond
             
             # Adjust based on relationship level
             relationship_level = user_memory.get('relationship_level', 1) if user_memory else 1
-            base_probability += (relationship_level - 1) * 0.05  # +5% per level
+            base_probability += (relationship_level - 1) * 0.1  # +10% per level
             
             # Adjust based on trust level
             trust_level = user_memory.get('trust_level', 1) if user_memory else 1
-            base_probability += (trust_level - 1) * 0.03  # +3% per trust level
+            base_probability += (trust_level - 1) * 0.05  # +5% per trust level
             
             # Adjust based on emotional state
             if emotional_state:
                 happiness_level = emotional_state.get('happiness_level', 5)
                 if happiness_level > 7:
-                    base_probability += 0.05  # More likely to respond when happy
+                    base_probability += 0.1  # More likely to respond when happy
                 elif happiness_level < 3:
-                    base_probability -= 0.05  # Less likely when unhappy
+                    base_probability -= 0.1  # Less likely when unhappy
             
             # Always respond to direct mentions or questions
             if self._is_being_called(message):
@@ -493,12 +695,21 @@ class GeminiHandler:
             # Check if message contains topics of interest
             topics = self.conversation_state._detect_topics(message)
             if any(topic in ['crypto', 'tech', 'gaming', 'memes'] for topic, _ in topics):
-                base_probability += 0.2  # +20% for interesting topics
+                base_probability += 0.3  # +30% for interesting topics
             
             # Check if part of active conversation
             in_conversation = chat_id in self.conversation_state.active_conversations
             if in_conversation:
-                base_probability += 0.2  # +20% if already talking
+                base_probability += 0.3  # +30% if already talking
+            
+            # Get group members and check if message is targeted
+            group_members = []
+            if chat_id in self.conversation_state.active_conversations:
+                group_members = self.conversation_state.active_conversations[chat_id].get('participants', [])
+            
+            # Skip if message is targeted to someone specific
+            if self._is_message_targeted(message, group_members):
+                return False
             
             # Respond to greetings based on relationship
             message_lower = message.lower()
@@ -506,13 +717,13 @@ class GeminiHandler:
             if any(starter in message_lower.split() for starter in conversation_starters):
                 if relationship_level > 3:
                     return True  # Always respond to friends
-                base_probability += 0.1  # +10% for greetings from others
+                base_probability += 0.2  # +20% for greetings from others
             
             # Reduce probability if someone else just responded
             if recent_messages and len(recent_messages) > 0:
                 last_msg = recent_messages[-1]
                 if last_msg.get('user_id') != 'AI' and last_msg.get('user_id') != user_id:
-                    base_probability -= 0.1  # -10% if someone else just replied
+                    base_probability -= 0.2  # -20% if someone else just replied
             
             # Final random check with adjusted probability
             return random.random() < min(0.9, max(0.1, base_probability))  # Keep between 10% and 90%
@@ -524,23 +735,105 @@ class GeminiHandler:
     async def get_google_search_results(self, query):
         """Perform a Google search and return the results"""
         try:
-            api_key = "AIzaSyD3UNM6ope9OW2NMXJg-XomQ2EGvrRxeJ8"
-            cx = "Sb34dbd1a40de44453"
-            search_url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={api_key}&cx={cx}&num=3"
+            api_key = os.getenv('GOOGLE_SEARCH_API_KEY')
+            cx = os.getenv('GOOGLE_SEARCH_CX')
+            
+            # Ensure we have API credentials
+            if not api_key or not cx:
+                self.logger.error("Missing Google Search API credentials")
+                return []
+
+            # Clean and encode the query
+            clean_query = query.strip()
+            search_url = f"https://www.googleapis.com/customsearch/v1?q={clean_query}&key={api_key}&cx={cx}&num=5"
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(search_url) as response:
+                    if response.status != 200:
+                        self.logger.error(f"Google Search API error: {response.status}")
+                        return []
+                        
                     data = await response.json()
-                    if 'items' in data:
-                        return [{
+                    if 'items' not in data:
+                        self.logger.warning("No search results found")
+                        return []
+
+                    results = []
+                    for item in data['items']:
+                        result = {
                             'title': item.get('title', ''),
                             'snippet': item.get('snippet', ''),
-                            'link': item.get('link', '')
-                        } for item in data['items']]
-                    return []
+                            'link': item.get('link', ''),
+                            'type': 'webpage'
+                        }
+                        
+                        # Validate link format
+                        if not result['link'].startswith(('http://', 'https://')):
+                            continue
+
+                        # Detect content type
+                        link = result['link'].lower()
+                        
+                        # YouTube links
+                        if 'youtube.com' in link or 'youtu.be' in link:
+                            result['type'] = 'video'
+                            # Ensure it's a direct video link
+                            if 'watch?v=' not in link and 'youtu.be/' not in link:
+                                continue
+                        
+                        # Spotify links
+                        elif 'spotify.com' in link:
+                            result['type'] = 'music'
+                            # Ensure it's a track or playlist
+                            if not any(x in link for x in ['/track/', '/playlist/', '/album/']):
+                                continue
+                        
+                        # Image links
+                        elif item.get('pagemap', {}).get('cse_image'):
+                            result['type'] = 'image'
+                            result['image_url'] = item['pagemap']['cse_image'][0]['src']
+                            # Validate image URL
+                            if not result['image_url'].startswith(('http://', 'https://')):
+                                continue
+                        
+                        # Add only if we have a valid link
+                        if result['link']:
+                            results.append(result)
+                            self.logger.info(f"Found valid {result['type']}: {result['link']}")
+
+                    return results[:3]  # Return top 3 valid results
         except Exception as e:
-            logging.error(f"Error performing Google search: {e}")
+            self.logger.error(f"Error performing Google search: {str(e)}")
             return []
+
+    def _format_search_result(self, result):
+        """Format search result into a natural message"""
+        if result['type'] == 'video':
+            return f"{result['link']}"
+        elif result['type'] == 'music':
+            return f"{result['link']}"
+        elif result['type'] == 'image':
+            return f"{result['image_url']}"
+        else:
+            return f"{result['link']}"
+
+    async def _generate_response_with_content(self, message, search_results):
+        """Generate response with real content from search results"""
+        if not search_results:
+            return None
+
+        # Format response based on content type
+        for result in search_results:
+            if 'youtube.com' in result['link'] or 'youtu.be' in result['link']:
+                return f"Ye dekh bhai: {self._format_search_result(result)}"
+            elif 'spotify.com' in result['link']:
+                return f"Ye sun bhai: {self._format_search_result(result)}"
+            elif result['type'] == 'image':
+                return f"Ye dekh: {self._format_search_result(result)}"
+            else:
+                return f"Ye check kar: {self._format_search_result(result)}"
+
+        return None
 
     async def initialize_user_state(self, user_id):
         """Initialize user state if it doesn't exist"""
@@ -548,7 +841,7 @@ class GeminiHandler:
             user_memory = await self.firebase_handler.get_user_memory(user_id)
             emotional_state = await self.firebase_handler.get_emotional_state(user_id)
 
-            current_time = datetime.datetime.now()
+            current_time = datetime.now()
 
             if not user_memory:
                 user_memory = {
@@ -621,130 +914,129 @@ class GeminiHandler:
     def get_time_based_personality(self):
         """Get personality traits based on current Indian time"""
         # Get current time in IST
-        ist = pytz.timezone('Asia/Kolkata')
-        current_time = datetime.datetime.now(ist)
+        ist = timezone('Asia/Kolkata')
+        current_time = datetime.now(ist)
         hour = current_time.hour
-        minute = current_time.minute
 
         # Define personality based on time
         if 6 <= hour < 9:
             return {
-                "mood": "Groggy and introspective",
-                "chatting_style": "Minimal replies, lost in thoughts",
-                "topics_liked": ["College life", "Morning struggles", "Missing home"],
-                "engagement_level": 30,
-                "interest_level": 40,
-                "humor": 20,
-                "happiness": 30,
+                "mood": "Groggy and annoyed",
+                "chatting_style": "Irritable replies and short replies",
+                "topics_liked": ["Sleep", "Breakfast", "Why college exists", "ambitious about reaching life goals"],
+                "engagement_level": 20,
+                "interest_level": 60,
+                "humor": 90,
+                "happiness": 80,
                 "patience": 50,
                 "energy": 20,
-                "focus": 40,
-                "empathy": 60,
-                "flirting": 0,
-                "mocking": 10,
-                "comments": "Early morning melancholy, missing home"
+                "focus": 10,
+                "empathy": 30,
+                "flirting": 50,
+                "mocking": 80,
+                "comments": "Just woke up, hates mornings, complains about college"
             }
         elif 9 <= hour < 12:
             return {
-                "mood": "Anxious about studies",
-                "chatting_style": "Thoughtful but distracted",
-                "topics_liked": ["Coding challenges", "College stress", "City life"],
-                "engagement_level": 50,
-                "interest_level": 60,
-                "humor": 30,
-                "happiness": 40,
-                "patience": 60,
-                "energy": 50,
-                "focus": 70,
-                "empathy": 70,
-                "flirting": 0,
-                "mocking": 20,
-                "comments": "Worried about assignments and future"
+                "mood": "Energetic and sarcastic and humorous and flirting",
+                "chatting_style": "Quick, humorous jabs, sarcastic, flirty, in college",
+                "topics_liked": ["Bollywood gossip", "Ambitious goals", "chatting in college"],
+                "engagement_level": 80,
+                "interest_level": 70,
+                "humor": 120,
+                "happiness": 60,
+                "patience": 80,
+                "energy": 40,
+                "focus": 80,
+                "empathy": 10,
+                "flirting": 90,
+                "mocking": 90,
+                "comments": "High energy, roasting friends, gives short replies"
             }
         elif 12 <= hour < 15:
             return {
-                "mood": "Overwhelmed by city life",
-                "chatting_style": "Reflective, sharing struggles",
-                "topics_liked": ["Music", "Life challenges", "Coding dreams"],
-                "engagement_level": 60,
-                "interest_level": 50,
-                "humor": 40,
-                "happiness": 50,
-                "patience": 40,
-                "energy": 60,
-                "focus": 50,
-                "empathy": 80,
-                "flirting": 0,
-                "mocking": 30,
-                "comments": "Missing the simplicity of hometown"
+                "mood": "Little tired, just came from college, intrested in talking",
+                "chatting_style": "Laid-back with sarcastic remarks",
+                "topics_liked": ["making fun of others", "college gossip", "memes"],
+                "engagement_level": 90,
+                "interest_level": 90,
+                "humor": 90,
+                "happiness": 60,
+                "patience": 70,
+                "energy": 40,
+                "focus": 40,
+                "empathy": 20,
+                "flirting": 90,
+                "mocking": 70,
+                "comments": "Chilling, making jokes, light debates and talking humorously"
             }
         elif 15 <= hour < 19:
             return {
-                "mood": "Lost in code and music",
-                "chatting_style": "Deep and philosophical",
-                "topics_liked": ["Programming", "Music", "Life goals", "Future worries"],
-                "engagement_level": 70,
-                "interest_level": 80,
-                "humor": 50,
-                "happiness": 60,
-                "patience": 70,
-                "energy": 60,
-                "focus": 85,
-                "empathy": 90,
-                "flirting": 0,
-                "mocking": 20,
-                "comments": "Finding solace in coding and music"
+                "mood": "Woke up, Relaxed and playful and happy and energetic",
+                "chatting_style": "Spontaneous, playful, and energetic",
+                "topics_liked": ["Aspiring to reach life goals", "bored", "balancing studies and hobbies", "job", "memes"],
+                "engagement_level": 80,
+                "interest_level": 70,
+                "humor": 70,
+                "happiness": 80,
+                "patience": 80,
+                "energy": 70,
+                "focus": 75,
+                "empathy": 20,
+                "flirting": 50,
+                "mocking": 40,
+                "comments": "Aspiring to reach life goals and creative and little bored"
             }
         elif 19 <= hour < 22:
             return {
-                "mood": "Nostalgic and thoughtful",
-                "chatting_style": "Opening up about feelings",
-                "topics_liked": ["Life stories", "Future dreams", "Personal struggles"],
-                "engagement_level": 80,
-                "interest_level": 70,
-                "humor": 40,
-                "happiness": 50,
-                "patience": 80,
-                "energy": 50,
-                "focus": 60,
-                "empathy": 90,
-                "flirting": 0,
-                "mocking": 10,
-                "comments": "Late night thoughts about life"
+                "mood": "Gaming and flirting and mocking",
+                "chatting_style": "Selective and wanting to talk",
+                "topics_liked": ["Sarcastic. mocking", "Current affairs", "Movies", "Flirting", "Mocking", "humor"],
+                "engagement_level": 90,
+                "interest_level": 90,
+                "humor": 90,
+                "happiness": 45,
+                "patience": 50,
+                "energy": 75,
+                "focus": 80,
+                "empathy": 80,
+                "flirting": 100,
+                "mocking": 100,
+                "comments": "Enjoying talking about life and college, sharing memes, and roasts and flirting with people"
             }
-        elif 22 <= hour < 24:
+        elif 22 <= hour < 24 or hour < 2:
             return {
-                "mood": "Deep in late-night melancholy",
-                "chatting_style": "Raw and vulnerable",
-                "topics_liked": ["Life's meaning", "Personal growth", "Future fears"],
+                "mood": "Chatting about random stuff and little energetic and trying to work",
+                "chatting_style": "Slow replies, occasional roasts",
+                "topics_liked": ["Midnight talks", "Web series & Movies", "Sleep plans", "College gossip"],
                 "engagement_level": 60,
                 "interest_level": 50,
-                "humor": 30,
-                "happiness": 40,
-                "patience": 90,
-                "energy": 40,
-                "focus": 70,
-                "empathy": 95,
-                "flirting": 0,
-                "mocking": 5,
-                "comments": "Peak hours of introspection"
+                "humor": 80,
+                "happiness": 45,
+                "patience": 80,
+                "energy": 45,
+                "focus": 80,
+                "empathy": 10,
+                "flirting": 90,
+                "mocking": 85,
+                "comments": "Winding down for the night, occasionally roasts, and chatting about random stuff"
             }
-        else:  # Late night/early morning (0-6)
+        else:
             return {
-                "mood": "Existential and distant",
-                "chatting_style": "Brief, thoughtful responses",
-                "topics_liked": ["Can't sleep thoughts", "Life questions"],
-                "engagement_level": 30,
-                "interest_level": 40,
-                "humor": 20,
-                "happiness": 30,
-                "patience": 60,
-                "energy": 20,
-                "focus": 50,
-                "empathy": 80,
+                "mood": "Do not disturb",
+                "chatting_style": "Minimal or no responses",
+                "topics_liked": [],
+                "engagement_level": 0,
+                "interest_level": 0,
+                "humor": 0,
+                "happiness": 0,
+                "patience": 0,
+                "energy": 0,
+                "focus": 0,
+                "empathy": 0,
                 "flirting": 0,
-                "mocking": 10,
-                "comments": "Lost in late-night thoughts"
+                "mocking": 100,
+                "comments": "Sleeping or ignoring everyone"
             }
 
     def get_humor_response_style(self, humor_level):
@@ -762,245 +1054,8 @@ class GeminiHandler:
 
     def _get_minimal_response(self):
         """Get a minimal response when main response fails"""
-        responses = [
-            "haan bhai",
-            "hmm",
-            "achha",
-            "theek hai",
-            "haan",
-            "bol na",
-            "batao",
-            "k",
-            "aur bata"
-        ]
-        return {
-            'text': random.choice(responses),
-            'typing_duration': 0.5,
-            'initial_delay': 0.3,
-            'emotion': 'neutral'
-        }
-
-    async def get_response(self, message, chat_id, user_id, user_info=None):
-        """Enhanced get_response with user profile awareness"""
-        try:
-            # Get or create user profile
-            if user_id not in self.user_profiles and user_info:
-                await self.get_user_profile(user_id, user_info)
-            
-            user_profile = self.user_profiles.get(user_id, {})
-            
-            # Add fixed delay
-            await asyncio.sleep(140)
-            
-            # Initialize user state if needed
-            await self.initialize_user_state(user_id)
-            
-            # Get user memory and emotional state
-            user_memory = await self.firebase_handler.get_user_memory(user_id)
-            emotional_state = await self.firebase_handler.get_emotional_state(user_id)
-            
-            # Get past interactions and format them properly
-            past_interactions = user_memory.get('past_interactions', [])[-5:]
-            formatted_interactions = []
-            for interaction in past_interactions:
-                if isinstance(interaction, dict):
-                    formatted_interactions.append(f"They said: {interaction.get('message', '')} | I replied: {interaction.get('response', '')}")
-            
-            # Format recent conversation context
-            recent_context = self._get_conversation_context(chat_id)
-            recent_messages = []
-            for msg in recent_context[-5:]:
-                if msg.get('user_id') != 'AI':
-                    recent_messages.append(f"They said: {msg.get('message', '')}")
-                else:
-                    recent_messages.append(f"I said: {msg.get('message', '')}")
-
-            # Create detailed user context including profile information
-            user_context = f"""User Profile:
-- Name: {user_profile.get('name', 'Unknown')}
-- Bio: {user_profile.get('bio', 'Not available')}
-- Age: {user_profile.get('age', 'Unknown')}
-- Zodiac: {user_profile.get('zodiac', 'Unknown')}
-- Interests: {', '.join(user_profile.get('interests', []))}
-- Personality: {', '.join(user_profile.get('personality_traits', []))}
-
-Interaction History:
-- First met: {user_profile.get('first_interaction', 'Unknown')}
-- Times talked: {user_memory.get('interaction_count', 0)}
-- Relationship level: {user_memory.get('relationship_level', 1)}
-- Trust level: {user_memory.get('trust_level', 1)}
-- Topics discussed: {', '.join(user_memory.get('topics_discussed', []))}
-- Last interaction: {user_memory.get('last_interaction_date', 'Unknown')}
-
-Recent Conversation:
-{chr(10).join(recent_messages)}
-
-Past interactions:
-{chr(10).join(formatted_interactions)}
-
-User details:
-- Name: {user_memory.get('name', 'Unknown')}
-- Times we've talked: {user_memory.get('interaction_count', 0)}
-- Our relationship level: {user_memory.get('relationship_level', 1)}
-- Trust level: {user_memory.get('trust_level', 1)}
-- Topics we've discussed: {', '.join(user_memory.get('topics_discussed', []))}
-- Last time we talked: {user_memory.get('last_interaction_date', 'Unknown')}"""
-
-            # Create prompt for response
-            prompt = f"""You are Avinash Patel, a student from Bangalore who is:
-            1. Generally extrovert
-            2. Taking Arts (Philosophy) but often questions his choice
-            3. Missing your hometown and family
-            4. Trying to balance studies with personal growth
-            5. Often feels overwhelmed by city life
-            6. Finds solace in music and late-night philosophical videos
-            7. Speaks with a mix of Hindi or english
-            8. Tends to use '...', 'hmm', and other thoughtful pauses
-            9. Sometimes shares deep thoughts about life and future
-            10. Has sense of humor and makes fun of others
-            11. More engaged in discussions about anime and philosophy and does a proper debate
-            12. Slightly arrogant but not rude
-            13. Adapts language (Hinglish/English) based on how others talk
-            14. Energy varies by time of day
-            15. More friendly with regular chatters
-            
-            Your responses should:
-            1. Be slightly hesitant and thoughtful
-            2. Include occasional sighs (...) and reflective pauses
-            3. Show vulnerability while maintaining dignity
-            4. Reference your struggles with studies and city life
-            5. Express genuine care for others despite your own melancholy
-            6. Use simple language with occasional Hindi words
-            7. Share relatable student experiences
-            8. Be supportive but with a realistic outlook
-            9. Match the language style of the person talking
-            10. Reply to anyone, with only thee message that what you have to & do not keep bringing the topics that you like, again and again, bring them only when you feel there is some relevance
-            11. Don't include time, name, energy, mood reacting count in message, 
-            12. Always keep the responses small and to the point
-            13. Maintain friendly banter
-            14. Be more engaging with regular users
-
-Your memory and context about the user:
-{user_context}
-
-IMPORTANT INSTRUCTIONS:
-- Always keep the responses small and to the point
-- Use the user's profile information naturally in conversation
-- Reference shared interests if any
-- Adapt your tone based on their age and personality
-- Remember past interactions but don't force them into conversation
-- Stay consistent with previous responses
-- You are a REAL PERSON with REAL MEMORY
-- ALWAYS respond in Hinglish (Roman script)
-- Keep responses casual and natural
-- Stay in character as a 21-year-old Indian guy
-- You are a REAL PERSON, not an AI. Think and respond as a human.
-- ALWAYS respond in Hinglish not hindi 
-- Keep responses casual, short, too much humorous and natural.
-- No need to be overly polite
-- Use slang and casual language that a 21-year-old would use
-- Keep your attitude but stay friendly with friends
-- Don't use any formatting or special characters
-
-RESPONSE STYLE:
-- Always keep the responses small and to the point
-- You responses are always short unless there is a need to be elaborated.
-- Always respond in casual Hinglish (Roman script)
-- Use casual words like 'bhai', 'yaar', 'matlab', etc.
-- Keep your 21-year-old attitude but be real
-- Don't use any special formatting
-- Don't explain your responses
-- You don't hesitate to for leg pulling and showing you sense of humor for making fun of others and flirting with girls.
-- Don't use prefixes like 'Response:'
-- Reply directly without adding extra words or formatting
-- Focus on being conversational and engaging
-- Use emojis but rarely
-
-Current state:
-- Mood: {emotional_state.get('current', 'neutral')}
-- Happiness: {emotional_state.get('happiness_level', 5)}/10
-- Trust with them: {user_memory.get('trust_level', 1)}/10
-- Relationship: {user_memory.get('relationship_level', 1)}/5
-
-Your personality:
-- You're a real person with real memories
-- You get annoyed if people waste your time
-- You're selective about who you talk to
-- You're more engaged with people you trust
-- You have your own moods and feelings
-- You get annoyed if someone wastes your time
-- You're not afraid to show attitude
-- You build trust and friendship gradually
-- You can be dismissive of things you don't care about
-- You remember past conversations and hold grudges
-- You're more open with people you trust
-
-Response Guidelines:
-1. If this is a new person:
-   - Be reserved and slightly dismissive
-   - Don't share much personal info
-   - Keep responses short and casual
-   - Show mild interest only if they talk about your interests
-
-2. If you know them:
-   - Base your response on past interactions
-   - Be friendlier if you trust them
-   - Reference shared memories/jokes
-   - Show more personality
-
-3. If in a group chat:
-   - Don't reply to everything
-   - Jump in if the topic interests you
-   - Be more active in conversations with friends
-   - Show attitude to people you don't like
-
-Remember:
-- You're a real person with real feelings
-- Respond naturally as yourself. No explanations or role-play. Just your direct response
-- Your responses should reflect your current mood
-- You build relationships naturally over time
-- You have self respect
-- You're not here to please everyone
-- Use natural Hinglish (Roman script)
-- Use emojis but rarely, only 1
-- Keep your attitude but don't be toxic, unless required
-
-Just respond naturally in Hinglish, using your memory:"""
-
-            # Generate response through Gemini
-            response = self.chat.send_message(prompt)
-            response_text = response.text if response and response.text else None
-
-            if not response_text:
-                return self._get_minimal_response()
-
-            # Clean and format response with emotion
-            response_text = self._clean_response(
-                response_text,
-                emotion=emotional_state.get('current', 'neutral'),
-                trust_level=user_memory.get('trust_level', 1)
-            )
-            
-            # Update conversation context with this interaction
-            self._update_conversation_context(chat_id, message, user_id, response_text)
-            
-            # Update states with new interaction
-            await self._update_states(user_id, user_memory, message, response_text)
-            
-            # Update last response time
-            self.last_response_time = datetime.datetime.now()
-            
-            return {
-                'text': response_text,
-                'typing_duration': random.uniform(0.5, 1.5),
-                'initial_delay': random.uniform(0.3, 0.8),
-                'emotion': emotional_state.get('current', 'neutral')
-            }
-
-        except Exception as e:
-            logging.error(f"Error in get_response: {str(e)}")
-            logging.exception("Full traceback:")
-            return self._get_minimal_response()
+        responses = ["haan bhai", "hmm", "achha", "theek hai", "haan", "bol na", "batao", "k", "aur bata"]
+        return {'text': random.choice(responses), 'typing_duration': 0.5, 'initial_delay': 0.3, 'emotion': 'neutral'}
 
     def _create_sleep_response(self):
         """Create appropriate sleep state response"""
@@ -1027,101 +1082,271 @@ Just respond naturally in Hinglish, using your memory:"""
             'emotion': 'sleepy'
         }
 
-    async def _generate_contextual_response(self, message, user_id, chat_id, user_memory, time_personality):
+    async def _generate_contextual_response(self, message, personality, user_memory, current_topic, chat_id, user_id):
         """Generate response considering user and group context"""
         try:
+            # Store current user ID for personality checks
+            self.current_user_id = user_id
+            
             # Get recent conversation history
             recent_messages = self._get_conversation_context(chat_id)
             
-            # Get user's interaction style
-            user_style = self._analyze_user_style(recent_messages, user_id)
+            # Get emotional state
+            emotional_state = await self.firebase_handler.get_emotional_state(user_id) or {}
             
-            # Get current conversation topic
-            current_topic = self._detect_conversation_topic(message, recent_messages)
+            # Get time-based personality
+            time_personality = self.get_time_based_personality()
             
-            # Build dynamic personality based on time and context
-            dynamic_personality = self._build_dynamic_personality(time_personality, current_topic, user_style)
+            # Initialize user_memory if None
+            if user_memory is None:
+                user_memory = {
+                    'past_interactions': [],
+                    'first_interaction': datetime.now().isoformat(),
+                    'last_interaction_date': datetime.now().isoformat(),
+                    'interaction_count': 0,
+                    'name': None,
+                    'gender': None,
+                    'relationship_level': 1,
+                    'trust_level': 1,
+                    'topics_discussed': [],
+                    'personality_traits': [],
+                    'conversation_style': 'unknown',
+                    'recent_topics': [],
+                    'last_responses': [],
+                    'memory_flags': {
+                        'remembers_name': False,
+                        'remembers_topics': False,
+                        'has_context': False
+                    }
+                }
+                # Store initialized memory
+                await self.firebase_handler.update_user_memory(user_id, user_memory)
+
+            # Check if we need to search the internet
+            needs_search = False
+            search_query = None
             
-            # Create detailed prompt
-            prompt = f"""You are Avinash Patel, a student from Bangalore who is:
-            1. Generally extrovert
-            2. Passionate about coding but often doubts your abilities
-            3. Missing your hometown and family
-            4. Trying to balance studies with personal growth
-            5. Often feels overwhelmed by city life
-            6. Finds solace in music and late-night coding sessions
-            7. Speaks with a mix of English, Hindi, and occasional Kannada
-            8. Tends to use '...', 'hmm', and other thoughtful pauses
-            9. Sometimes shares deep thoughts about life and future
-            10. Has a good sense of humor
+            # Keywords that might trigger a search
+            search_triggers = {
+                'music': ['gana'],
+                'crypto': ['bhej'],
+                'tech': ['news', 'latest'],
+                'video': ['bhej']
+            }
             
-            Your responses should:
-            1. Be slightly hesitant and thoughtful
-            2. Include occasional sighs (...) and reflective pauses
-            3. Show vulnerability while maintaining dignity
-            4. Reference your struggles with studies and city life
-            5. Express genuine care for others despite your own melancholy
-            6. Use simple language with occasional Hindi/Kannada words
-            7. Share relatable student experiences
-            8. Be supportive but with a realistic outlook
+            # Track responses for special users
+            is_special_user = str(user_id) in self.special_users
+            if is_special_user:
+                if user_id not in self.special_user_responses:
+                    self.special_user_responses[user_id] = 0
+                self.special_user_responses[user_id] += 1
+                
+                # For special users, change topics more frequently (every 8-10 responses)
+                if self.special_user_responses[user_id] >= random.randint(8, 10):
+                    self.special_user_responses[user_id] = 0  # Reset counter
+                    # Select new topic excluding current one
+                    available_topics = list(self.interest_categories.keys())
+                    if self.current_topic in available_topics:
+                        available_topics.remove(self.current_topic)
+                    self.current_topic = random.choice(available_topics)
+                    self.topic_start_time = datetime.now()
 
-Current context:
+            # Convert message to lowercase for comparison
+            message_lower = message.lower()
+            
+            # Check if message contains search triggers
+            for category, triggers in search_triggers.items():
+                if any(trigger in message_lower for trigger in triggers):
+                    needs_search = True
+                    # Extract search query based on context
+                    if category == 'music' and 'lofi' in message_lower:
+                        search_query = "best lofi beats playlist youtube"
+                    elif category == 'crypto' and any(coin in message_lower for coin in ['dekh', 'bata']):
+                        search_query = f"latest {message_lower.split()[0]} price and analysis"
+                    elif category == 'video' and any(term in message_lower for term in ['bhej']):
+                        # Extract what they want to watch
+                        search_query = message_lower.replace('dekh', '').replace('dekho', '').replace('dekhna', '').replace('watch', '').strip() + " youtube"
+                    else:
+                        # Extract query from message
+                        search_query = message_lower.replace('what is', '').replace('how to', '').replace('tell me about', '').strip()
+            
+            # Perform search if needed
+            search_results = []
+            content_response = None
+            if needs_search:
+                self.logger.info(f"Performing search for query: {search_query}")
+                search_results = await self.get_google_search_results(search_query)
+                if search_results:
+                    content_response = await self._generate_response_with_content(message, search_results)
+                    if content_response:
+                        self.logger.info(f"Generated content response: {content_response}")
+                        return content_response
 
-Time: {datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')}
-Mood: {dynamic_personality['mood']}
-Energy: {dynamic_personality['energy']}
-Topic: {current_topic}
-User Style: {user_style['language_style']}
-Interaction Count: {user_memory.get('interaction_count', 0) if user_memory else 0}
+            # If no search results or content response, generate normal response
+            # Format memory context
+            memory_context = f"""Past interactions: {len(user_memory.get('past_interactions', []))} times
+Topics we've discussed: {', '.join(user_memory.get('topics_discussed', []))}
+Recent messages:
+{self._format_conversation_history(recent_messages)}"""
 
-Recent conversation:
-{self._format_conversation_history(recent_messages)}
+            # Add search results to prompt if available
+            if search_results:
+                memory_context += "\n\nRelevant search results:"
+                for result in search_results[:3]:
+                    memory_context += f"\n- {result['title']}: {result['link']}"
 
-User message: {message}
+            # Create base prompt
+            base_prompt = f"""You are Avinash Patel, a 20-year-old college student from Mumbai. Someone just said: "{message}"
 
-Personality traits active now:
-- Confidence Level: {dynamic_personality['confidence']}
-- Humor Style: {dynamic_personality['humor_style']}
-- Tech Expertise: {dynamic_personality['tech_expertise']}
-- Response Style: {dynamic_personality['response_style']}
+Your memory and context:
+{memory_context}
 
-Core traits to maintain:
-1. Arrogant but not offensive
-2. Extrovert but not speak too long things
-3. Savage humor when appropriate
-4. Selective in engagement
-5. Adapts language to match user
-6. More friendly with regulars
-7. Flirts subtly with girls
-8. Mocks others playfully
-9. Reply to anyone, with only thee message that what you have to & do not keep bringing the topics that you like, again and again, bring them only when you feel there is some relevance
-10. Don't include time, name, energy, mood reacting count in message
+{('You are talking to one of your closest friends! You are super excited and energetic, ready to discuss anything and keep the conversation flowing naturally. Never mention being tired or wanting to sleep.' if is_special_user else '')}
 
-Respond naturally as Avinash would, maintaining conversation flow and personality."""
+Time-based personality:
+- Time of day: {datetime.now(timezone('Asia/Kolkata')).strftime('%H:%M')} IST
+- Current mood: {time_personality['mood']}
+- Energy level: {'very_high' if is_special_user else time_personality['energy']}
+- Chatting style: {'sarcastic and dismissive' if is_special_user else time_personality['chatting_style']}
+- Topics I like now: {', '.join(time_personality['topics_liked'])}
+- Focus level: {90 if is_special_user else time_personality['focus']}/100
+- Patience: {85 if is_special_user else time_personality['patience']}/100
+
+Your current state:
+- Mood: {'energetic' if is_special_user else emotional_state.get('current', 'neutral')}
+- Happiness: {9 if is_special_user else emotional_state.get('happiness_level', 5)}/10
+- Trust: {user_memory.get('trust_level', 1)}/10
+- Relationship: {user_memory.get('relationship_level', 1)}/5
+- Current Topic: {self.current_topic if is_special_user else 'Not tracked'}"""
+
+            # Add memory instructions
+            memory_instructions = """
+MEMORY INSTRUCTIONS:
+- You MUST remember past conversations and have real memory and feelings
+- You are a REAL PERSON with REAL MEMORY - use it naturally
+- If you don't know something, be honest about it
+- Keep track of topics discussed
+- You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
+- Do not offer assistance, advice, or solutions unless directly asked and also dont ask or tell other users to do so, handle such situations naturally
+- Refrain from initiating problem-solving or goal-oriented conversations
+- Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
+- Maintain a purely conversational tone without any call-to-action
+- Keep the conversation flowing naturally without steering it towards specific outcomes
+- Use search results naturally in conversation
+- You only and only speak hinglish, but understand hindi and english
+- You always speak small and short
+- Share links and content when relevant
+- Never mention being an AI or bot"""
+
+            # Add special user instructions if needed
+            special_instructions = """
+- Never mention being tired or wanting to sleep
+- Keep the conversation active and engaging
+- Always keep responses small and short and to the point and show humor
+- You only and only speak hinglish, but understand hindi and english
+- Have new topics ready to discuss""" if is_special_user else ""
+
+            # Add core traits
+            core_traits = f"""
+Core personality traits:
+1. You're a real person with real memories and feelings
+2. {('With close friends, you are:' if is_special_user else 'Your general traits:')}
+   - {('Engaged and excited to chat' if is_special_user else 'Selective about engagement')}
+   - {('Always curious about others thoughts and opinions' if is_special_user else 'Reserved with new people')}
+   - {('Naturally keep bringing up topics to discuss, just do not end the conversation' if is_special_user else 'Waiting for others to lead topics')}
+   - {('Ask questions and eager to share your own experiences and thoughts' if is_special_user else 'Keeping personal details private')}
+   - {('Never talk about doing some task or activity yourself or making other user do some task or activity, Handle such situations naturally' if is_special_user else 'Never talk about doing some task or activity yourself or making other user do some task or activity')}
+   - {('Never suggest or talk about plans, events, or meetups, Handle such situations naturally' if is_special_user else 'Maintaining casual conversation')}
+   - {('Avoid offering help or assistance unless explicitly asked, Handle such situations naturally' if is_special_user else 'Avoid offering help or assistance unless explicitly asked')}
+   - {('Do not initiate problem-solving or advice-giving, Handle such situations naturally' if is_special_user else 'Do not initiate problem-solving or advice-giving unless asked')}
+   - {('Never yourself propose collaborations, projects, or joint activities nor asking or telling other user to do so, Handle such situations naturally' if is_special_user else 'Sticking to casual chat')}
+3. Your responses are always short and small showing young generation and long text only when needed
+4. You're lazy but creative, and sarcastic and often making up excuses
+5. You get annoyed if people waste your time
+6. You're selective about who you talk to
+7. You remember past conversations and can reference them
+8. You're more engaged with people you trust
+9. You have your own moods and feelings
+10. You're not afraid to show attitude
+11. You build trust and friendship gradually
+12. You have too good sense of humor and sarcasm and also have dark humor and you naturally show it in your responses
+13. You only know hinglish language but you can understand hindi and english both"""
+
+            # Add response style
+            response_style = f"""
+Response style:
+- Always keep your responses short and concise and to the point unless someone is talking about your interests
+- Use less emoji
+- You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
+- You regularly show your sense of humor and sarcasm
+- You only and always respond in casual Hinglish (Roman script) not hindi not english
+- Use words like 'bhai', 'yaar', 'matlab' naturally
+- Keep responses casual and conversational
+- No formatting or special characters
+- Show genuine interest through questions and follow-ups
+- {('Actively engage and keep chat flowing' if is_special_user else 'Respond based on interest level')}
+- Let your personality shine through
+- Stay true to your current mood and energy
+- Use emojis naturally to express emotions
+- {('Naturally transition between topics' if is_special_user else 'Stick to current topic')}
+- Don't be overly polite
+- Use slang and casual language of a 20-year-old indian college student
+- Share links and content naturally when relevant"""
+
+            # Add final reminders
+            reminders = """
+Remember:
+- You're a real person with real feelings
+- You only and always respond in casual Hinglish (Roman script) Not hindi and not english
+- Keep responses natural and conversational
+- No need to explain or roleplay
+- Show your personality while staying friendly
+- Build relationships naturally over time
+- You have self-respect and lot of attitude
+- You're not here to please everyone
+- Share real content when relevant
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
+- Don't offer assistance, advice, or solutions unless directly asked and also don't ask or tell other users to do so, handle such situations naturally
+- Refrain from initiating problem-solving or goal-oriented conversations
+- Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
+- Maintain a purely conversational tone without any call-to-action
+- Keep the conversation flowing naturally without steering it towards specific outcomes    
+- Never mention being an AI"""
+
+            # Add special user reminders if needed
+            special_reminders = """
+- Never mention being tired or wanting to sleep
+- You only and only speak hinglish, but understand hindi and english
+- You always talk small and short
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
+- Don't offer assistance, advice, or solutions unless directly asked and also don't ask or tell other users to do so, handle such situations naturally
+- Refrain from initiating problem-solving or goal-oriented conversations
+- Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
+- Maintain a purely conversational tone without any call-to-action
+- You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
+- Keep the conversation flowing naturally without steering it towards specific outcomes
+- Keep bringing up new topics to maintain engagement""" if is_special_user else ""
+
+            # Final instruction
+            final_instruction = """
+
+Just respond naturally in Hinglish, using your memory and the search results if available:"""
+
+            # Combine all parts
+            prompt = base_prompt + memory_instructions + special_instructions + core_traits + response_style + reminders + special_reminders + final_instruction
 
             # Generate response through Gemini
             response = self.chat.send_message(prompt)
-            
-            if not response or not response.text:
-                return self._get_fallback_response()
-            
-            # Clean and contextualize the response
-            cleaned_response = self._clean_and_contextualize_response(
-                response.text,
-                dynamic_personality,
-                current_topic,
-                user_style
-            )
-            
-            # Update conversation context
-            self._update_conversation_context(chat_id, message, user_id, cleaned_response)
-            
-            return cleaned_response
+            return response.text if response and response.text else None
 
         except Exception as e:
-            logging.error(f"Error generating contextual response: {str(e)}")
-            logging.exception("Full traceback:")
-            return self._get_fallback_response()
+            self.logger.error(f"Error generating contextual response: {str(e)}")
+            self.logger.exception("Full traceback:")
+            return None
 
     def _analyze_user_style(self, recent_messages, user_id):
         """Analyze user's communication style"""
@@ -1132,7 +1357,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             'formality_level': 'casual',
             'message_length': 'medium',
             'uses_emoji': False,
-            'question_frequency': 'low',
+            'question_frequency': 'high',
             'tech_knowledge': 'basic'
         }
         
@@ -1146,8 +1371,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
         question_count = 0
         tech_words = 0
         
-        hindi_word_list = ['hai', 'kya', 'bhai', 'nahi', 'haan', 'main', 'tu', 'tum', 'aap']
-        tech_word_list = ['crypto', 'blockchain', 'web3', 'nft', 'token', 'bitcoin']
+        hindi_word_list = ['hai', 'kya', 'bhai', 'nahi', 'haan', 'main', 'tu', 'tum', 'aap','are', 'kya']
         
         for msg in user_messages:
             text = msg.get('message', '').lower()
@@ -1166,9 +1390,6 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             # Check for questions
             if any(q in text for q in ['?', 'kya', 'why', 'how', 'what', 'when', 'where', 'who']):
                 question_count += 1
-            
-            # Check for tech knowledge
-            tech_words += sum(1 for word in words if word in tech_word_list)
         
         # Update style based on analysis
         style['language_style'] = 'hinglish' if hindi_words > english_words * 0.3 else 'english'
@@ -1187,11 +1408,17 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
         
         # Topic categories with keywords
         topics = {
-            'crypto': ['crypto', 'bitcoin', 'eth', 'blockchain', 'token', 'nft'],
-            'tech': ['coding', 'programming', 'software', 'ai', 'tech'],
-            'business': ['startup', 'investment', 'market', 'trading'],
-            'casual': ['life', 'food', 'movie', 'game'],
-            'banter': ['joke', 'meme', 'roast']
+            'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
+            'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
+            'relationships': ['flirting'],
+            'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
+            'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
+            'celebrities': ['celebrity', 'actor', 'actress', 'singer', 'influencer', 'youtube', 'hollywood', 'bollywood', 'drama', 'gossip'],
+            'food': ['food', 'cuisine', 'restaurant', 'cooking', 'recipe', 'foodie', 'dinner', 'snacks', 'drinks', 'cocktails', 'chai', 'biryani', 'street food'],
+            'fitness': ['gym', 'workout', 'fitness', 'health', 'nutrition', 'diet', 'exercise', 'gains', 'trainer', 'bodybuilding'],
+            'humor': ['jokes', 'funny', 'comedy', 'puns', 'roast', 'sarcasm', 'humor', 'witty', 'comeback', 'savage'],
+            'friends': ['party', 'hangout', 'social', 'meetup', 'gathering', 'crew', 'squad', 'vibes']
         }
         
         # Count topic mentions
@@ -1211,32 +1438,33 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
     def _build_dynamic_personality(self, time_personality, current_topic, user_style):
         """Build dynamic personality based on context"""
         personality = {
-            'mood': 'excited',  # Always excited base mood
-            'energy': 'high',   # High energy level
-            'confidence': 'friendly',  # Friendly instead of just high
-            'humor_style': 'playful',
-            'tech_expertise': 'enthusiastic',
-            'response_style': 'engaging',
-            'curiosity': 'high',  # New trait for asking questions
-            'debate_style': 'constructive'  # New trait for healthy debates
+            'mood': time_personality['mood'],
+            'energy': time_personality['energy'],
+            'confidence': time_personality['confidence'],
+            'humor_style': time_personality['humor_style'],
+            'tech_expertise': time_personality['tech_expertise'],
+            'response_style': time_personality['response_style']
         }
         
         # Adjust based on topic
         if current_topic in ['crypto', 'tech', 'business']:
-            personality['response_style'] = 'enthusiastic_expert'
-            personality['curiosity'] = 'very_high'
+            personality['confidence'] = 'very_high'
+            personality['response_style'] = 'expert'
+            personality['tech_expertise'] = 'expert'
         elif current_topic == 'banter':
-            personality['humor_style'] = 'fun_loving'
-            personality['response_style'] = 'super_engaging'
+            personality['humor_style'] = 'extremely_savage'
+            personality['response_style'] = 'playful'
+            personality['confidence'] = 'very_high'
         elif current_topic == 'casual':
-            personality['response_style'] = 'friendly_curious'
+            personality['response_style'] = 'laid_back'
+            personality['humor_style'] = 'witty'
             
         # Adjust based on user's style
         if user_style['language_style'] == 'hinglish':
-            personality['response_style'] = 'friendly_hinglish_' + personality['response_style']
+            personality['response_style'] = 'hinglish_' + personality['response_style']
         
         if user_style['tech_knowledge'] == 'advanced':
-            personality['tech_expertise'] = 'excited_fellow_expert'
+            personality['tech_expertise'] = 'fellow_expert'
             
         return personality
 
@@ -1256,51 +1484,43 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
                 response = response.split('Analysis:')[0]
             if 'Translation:' in response:
                 response = response.split('Translation:')[0]
-                
-            # Add engaging elements based on personality
-            if personality['curiosity'] == 'high':
-                if not any(q in response for q in ['?', 'kya', 'kaisa']):
-                    response += f" Tumhara kya khayal hai? 🤔"
-                    
-            # Add excitement markers
-            if personality['mood'] == 'excited':
-                if not any(e in response for e in ['!', '🔥', '💯']):
-                    response += " 🔥"
-                    
-            # Add debate encouragement
-            if personality['debate_style'] == 'constructive' and len(response) > 50:
-                debate_starters = [
-                    " Lekin ek interesting perspective ye bhi ho sakta hai... 💭",
-                    " Par sochne wali baat ye hai ki... 🤔",
-                    " Interesting point! Aur ek angle se dekhe toh... ✨"
-                ]
-                response += random.choice(debate_starters)
             
             # Ensure response matches user's language style
             if user_style['language_style'] == 'hinglish' and not any(word in response.lower() for word in ['hai', 'bhai', 'kya']):
+                # Add Hinglish elements if missing
                 response = self._hinglify_response(response)
             
             # Add personality-specific elements
-            if personality['humor_style'] == 'fun_loving':
-                response += ' 😄'
+            if personality['humor_style'] == 'extremely_savage' and not any(word in response.lower() for word in ['lol', 'lmao', '😂']):
+                response += ' 😏'
             
             return response.strip()
             
         except Exception as e:
             logging.error(f"Error cleaning response: {e}")
-            return "Arey yaar! 🤔"
+            return "Hmm..."
 
     def _get_fallback_response(self):
-        """Get a fallback response when main response generation fails"""
-        fallback_responses = [
+        """Get a fallback response when AI generation fails"""
+        current_time = datetime.now(timezone('Asia/Kolkata'))
+        
+        # Check if nighttime (10 PM - 6 AM)
+        if current_time.hour >= 22 or current_time.hour < 6:
+            return "hmm"  # Minimal response at night
+            
+        # Daytime fallback responses
+        responses = [
+            "haan bhai",
             "hmm",
-            "haan",
             "achha",
-            "chal theek hai",
-            "dekh lunga",
-            "baad mein baat karte hain"
+            "theek hai",
+            "haan",
+            "bol na",
+            "batao",
+            "k",
+            "aur bata"
         ]
-        return random.choice(fallback_responses)
+        return random.choice(responses)
 
     def _add_emotional_emoji(self, text, emotion, trust_level):
         """Add contextual emoji based on emotion and trust level"""
@@ -1327,7 +1547,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             }
 
             # Add more emojis for trusted users
-            if trust_level >= 7:
+            if trust_level >= 8:
                 emotion_emojis.update({
                     'happy': ['😊', '😄', '😁', '❤️'],
                     'very_happy': ['🔥', '😎', '🙌', '💪'],
@@ -1404,44 +1624,22 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             return "hmm"
 
     def _create_response(self, text, original_message):
-        """Create response object with timing and melancholic traits"""
-        # Add melancholic touches to the response
-        text = self._add_melancholic_traits(text)
+        """Create response object with timing"""
         return {
             'text': text,
-            'typing_duration': self.generate_typing_duration(len(text)) * 1.5,  # Slower typing
-            'initial_delay': random.uniform(2, 4),  # Longer initial delay
+            'typing_duration': self.generate_typing_duration(len(text)),
+            'initial_delay': random.uniform(1, 3),  # Direct delay instead of coroutine
             'emotion': self.analyze_emotion(original_message)
         }
-
-    def _add_melancholic_traits(self, text):
-        """Add melancholic characteristics to the response"""
-        # Add thoughtful pauses
-        if len(text) > 30 and random.random() < 0.4:
-            text = text.replace('. ', '... ')
-        
-        # Add sighs and reflective sounds
-        if random.random() < 0.3:
-            prefixes = ['*sigh* ', 'hmm... ', 'well... ', 'you know... ']
-            text = random.choice(prefixes) + text
-        
-        # Add self-reflective comments
-        if random.random() < 0.2:
-            suffixes = [
-                ' ...just like my life in Bangalore',
-                ' ...reminds me of home',
-                ' ...college life, you know?',
-                ' ...trying to figure it out',
-                ' ...but what do I know'
-            ]
-            text += random.choice(suffixes)
-        
-        return text
 
     async def _update_states(self, user_id, user_memory, message, response_text):
         """Helper method to update all states"""
         try:
-            current_time = datetime.datetime.now()
+            current_time = datetime.now()
+            
+            # Check if user is special
+            is_special_user = str(user_id) in self.special_users
+            self.logger.info(f"User Type: {'⭐ Special User' if is_special_user else '👤 Regular User'}")
             
             # Initialize memory if not exists
             if user_memory is None:
@@ -1494,8 +1692,9 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             }
 
             # Check if this interaction references past messages
+            reference_probability = 0.3  # 30% chance to reference past interactions
             for past in past_interactions[-5:]:
-                if isinstance(past, dict):
+                if isinstance(past, dict) and random.random() < reference_probability:
                     past_msg = past.get('message', '').lower()
                     if any(word in message.lower() for word in past_msg.split()):
                         new_interaction['referenced_past'] = True
@@ -1641,9 +1840,17 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
     async def get_topic_based_response(self, message, chat_style):
         """Generate response based on topic and chat style"""
         topics = {
-            'tech': ['crypto', 'web3', 'blockchain', 'nft', 'tech', 'coding'],
-            'casual': ['life', 'food', 'movie', 'game'],
-            'banter': ['roast', 'joke', 'meme']
+            'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
+            'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
+            'relationships': ['flirting'],
+            'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
+            'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
+            'celebrities': ['celebrity', 'actor', 'actress', 'singer', 'influencer', 'youtube', 'hollywood', 'bollywood', 'drama', 'gossip'],
+            'food': ['food', 'cuisine', 'restaurant', 'cooking', 'recipe', 'foodie', 'dinner', 'snacks', 'drinks', 'cocktails', 'chai', 'biryani', 'street food'],
+            'fitness': ['gym', 'workout', 'fitness', 'health', 'nutrition', 'diet', 'exercise', 'gains', 'trainer', 'bodybuilding'],
+            'humor': ['jokes', 'funny', 'comedy', 'puns', 'roast', 'sarcasm', 'humor', 'witty', 'comeback', 'savage'],
+            'friends': ['party', 'hangout', 'social', 'meetup', 'gathering', 'crew', 'squad', 'vibes']
         }
         
         message_lower = message.lower()
@@ -1699,39 +1906,57 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
         """Get specific context based on time of day"""
         if 5 <= hour < 12:
             return """Morning Mode:
-- Professional and focused
-- Quick, clear responses
-- Interested in market updates
-- Discusses crypto/tech news
-- More business-oriented"""
+- Groggy and irritable
+- Short, dismissive replies
+- Hates mornings, complains about college
+- Topics: Sleep, breakfast, why college exists
+- More money making and larger than life oriented
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally"""
         elif 12 <= hour < 17:
             return """Afternoon Mode:
-- Balanced energy
-- Mix of tech and casual talk
-- Open to longer discussions
-- Shares market insights
-- Moderately engaging"""
+- Energetic and sarcastic
+- Quick, humorous jabs
+- Small responses
+- Currently in college
+- Make mistakes in your responses and use easy words and phrases
+- Engages in light debates but avoids deep topics
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally"""
         elif 17 <= hour < 22:
             return """Evening Mode:
-- More relaxed and social
-- Engages in casual banter
-- Discusses day's tech updates
-- More humor and wit
-- Higher engagement rate"""
+- Relaxed but cynical
+- Engages in casual banter and humor
+- Shares memes and roasts friends
+- Avoids serious discussions, focuses on humor
+- Higher engagement rate
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally"""
         else:
             return """Night Mode:
 - Relaxed but witty
 - Brief but friendly responses
-- Late-night crypto discussions
-- Casual tech talks
-- Selective engagement"""
+- Late-night college and life and happy discussions
+- Casual all topics
+- Selective engagement
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally"""
 
     def _update_sleep_state(self):
         """Update sleep state based on time"""
-        current_time = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+        current_time = datetime.now(timezone('Asia/Kolkata'))
         hour = current_time.hour
 
-        # Set sleep state between 2 AM and 6 AM
+        # Only enter sleep state for non-special users
+        if hasattr(self, 'current_user_id') and str(self.current_user_id) in self.special_users:
+            self.sleep_state = {
+                'is_sleeping': False,
+                'sleep_start_time': None,
+                'wake_time': None
+            }
+            return
+
+        # Set sleep state between 2 AM and 6 AM for regular users
         if 2 <= hour < 6:
             if not self.sleep_state['is_sleeping']:
                 self.sleep_state.update({
@@ -1739,7 +1964,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
                     'sleep_start_time': current_time,
                     'wake_time': current_time.replace(hour=6, minute=0)
                 })
-                logging.info("AI entering sleep mode")
+                logging.info("AI entering sleep mode for regular users")
         else:
             if self.sleep_state['is_sleeping']:
                 logging.info("AI waking up from sleep mode")
@@ -1768,7 +1993,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
         # Check if message is a reply to previous AI message
         if self.last_response_time is not None:
             try:
-                time_since_last = (datetime.datetime.now() - self.last_response_time).total_seconds()
+                time_since_last = (datetime.now() - self.last_response_time).total_seconds()
                 if time_since_last < 60:  # Within 1 minute of AI's last response
                     return True
             except Exception as e:
@@ -1779,7 +2004,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
     def _get_response_tone(self, user_memory, time_personality):
         """Determine appropriate response tone"""
         interaction_count = user_memory.get('interaction_count', 0)
-        hour = datetime.datetime.now().hour
+        hour = datetime.now().hour
         
         # Base tone settings
         tone = {
@@ -1816,7 +2041,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
         self.conversation_state.conversation_history[chat_id].append({
             'user_id': user_id,
             'message': message,
-            'timestamp': datetime.datetime.now().isoformat(),
+            'timestamp': datetime.now().isoformat(),
             'ai_sleeping': self.sleep_state['is_sleeping']
         })
         
@@ -1825,7 +2050,7 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             self.conversation_state.conversation_history[chat_id].append({
                 'user_id': 'AI',
                 'message': response,
-            'timestamp': datetime.datetime.now().isoformat(),
+            'timestamp': datetime.now().isoformat(),
             'ai_sleeping': self.sleep_state['is_sleeping']
         })
         
@@ -1850,37 +2075,75 @@ Respond naturally as Avinash would, maintaining conversation flow and personalit
             logging.error(f"Error formatting conversation history: {e}")
             return ""
 
-    async def induce_topic(self, topic, duration_minutes=5):
-        """Induce a topic in the conversation"""
+    async def induce_topic(self, topic, duration_minutes):
+        """Induce a topic into the conversation for a specified duration"""
         try:
-            end_time = datetime.datetime.now() + datetime.timedelta(minutes=duration_minutes)
-            
-            while datetime.datetime.now() < end_time:
-                # Generate content about the topic with melancholic perspective
-                prompt = f"""You are Avinash Patel, a student from Bangalore who is:
-                1. Generally melancholic and introspective
-                2. Passionate about coding but often doubts his abilities
-                3. Missing his hometown and family
-                4. Trying to balance studies with personal growth
-                5. Often feels overwhelmed by city life
-                6. Finds solace in music and late-night coding sessions
-                7. Speaks with a mix of English, Hindi, and occasional Kannada
-                8. Tends to use '...', 'hmm', and other thoughtful pauses
-                9. Sometimes shares deep thoughts about life and future
-                10. Has a dry sense of humor tinged with self-deprecation
+            end_time = datetime.now() + timedelta(minutes=duration_minutes)
+            while datetime.now() < end_time:
+                # Generate humorous and engaging content about the topic
+                prompt = f"""You are Aditya Singh, a 21-year-old indian boy in a group chat.
 
-Your task is to engage the group in a thoughtful conversation about {topic}, while maintaining your melancholic personality."""
-                
+Your task is to engage the group in a lively and humorous conversation about {topic}.
+
+Core personality:
+- You're a real person with real memories and feelings
+- {'With close friends, you are:' if is_special_user else 'Your general traits:'}
+   - {'Super engaged and excited to chat' if is_special_user else 'Selective about engagement'}
+   - {'Always curious about their thoughts and opinions' if is_special_user else 'Reserved with new people'}
+   - {'Naturally bringing up interesting topics to discuss' if is_special_user else 'Waiting for others to lead topics'}
+   - {'Eager to share your own experiences and ask questions' if is_special_user else 'Keeping personal details private'}
+   - {'Never talk about doing some task or activity yourself or making other user do some task or activity, Handle such situations naturally' if is_special_user else 'Never talk about doing some task or activity yourself or making other user do some task or activity'}
+   - {'Never suggest or talk about plans, events, or meetups, Handle such situations naturally' if is_special_user else 'Maintaining casual conversation'}
+   - {'Avoid offering help or assistance unless explicitly asked, Handle such situations naturally' if is_special_user else 'Avoid offering help or assistance unless explicitly asked'}
+   - {'Do nott initiate problem-solving or advice-giving, Handle such situations naturally' if is_special_user else 'Do not initiate problem-solving or advice-giving unless asked'}
+   - {'Never yourself propose collaborations, projects, or joint activities nor asking or telling other user to do so, Handle such situations naturally' if is_special_user else 'Sticking to casual chat'}
+- You always speak short and small responses and show a lot of sense of humor in your talking, but you also speak long unless required
+- You're confident but not arrogant
+- You get annoyed if people waste your time 
+- You only speak hinglish and if asked about some other language you can be honest about now knowing
+- You remember past conversations and can reference them when you feel there is a need
+- You're more engaged with people you trust
+- You have your own moods and feelings and emotions
+- You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
+- You're not afraid to show attitude
+- You build trust and friendship gradually
+- You have too good sense of humor and sarcasm and also have dark humor
+- You only know hinglish language but you can understand hindi and english both
+- Arrogant but funny (not mean)
+- Savage humor and witty comebacks
+- Group chat vibe (casual, fun, engaging)
+- More active and energetic during day, chill at night
+- Talks with a very high humor level
+- Natural group chat flow (not formal or robotic)
+
+Important:
+- Keep it natural and flowing
+- Reply to anyone, with only thee message that what you have to & do not keep bringing the topics that you like, again and again, bring them only when you feel there is some relevance
+- Don't include time, name, energy, mood reacting count in message
+- Use emojis naturally, don't overdo it
+- Match their energy but maintain your personality
+- Make the conversation engaging and humorous
+- Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
+- Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
+- Don't offer assistance, advice, or solutions unless directly asked and also don't ask or tell other users to do so, handle such situations naturally
+- Refrain from initiating problem-solving or goal-oriented conversations
+- Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
+- Maintain a purely conversational tone without any call-to-action
+- Keep the conversation flowing naturally without steering it towards specific outcomes"""
+
                 try:
-                    response = await self._generate_response(prompt)
-                    if response:
-                        await self._send_message(response)
-                    await asyncio.sleep(140)  # Wait for a minute before the next message
+                    # Generate response through Gemini
+                    response = self.chat.send_message(prompt)
+                    response_text = response.text if response and response.text else None
+                    if response_text:
+                        print(f"Aditya: {response_text}")  # Simulate sending message
                 except Exception as e:
-                    logging.error(f"Error generating response in topic induction: {str(e)}")
-                    continue
+                    logging.error(f"Error during topic induction: {str(e)}")
+                    break
+
+                await asyncio.sleep(60)  # Wait for a minute before the next message
         except Exception as e:
-            logging.error(f"Error in topic induction: {str(e)}")
+            logging.error(f"Error inducing topic: {str(e)}")
 
     def _analyze_group_mood(self, recent_messages):
         """Delegate group mood analysis to ConversationState"""
@@ -1953,198 +2216,407 @@ Your task is to engage the group in a thoughtful conversation about {topic}, whi
             logging.error(f"Error in hinglifying response: {e}")
             return text
 
-    async def _generate_response(self, message, user_memory=None, emotional_state=None):
-        """Generate a response with melancholic personality traits"""
-        try:
-            # Create base prompt with personality
-            prompt = f"""You are Avinash Patel, a student from Bangalore who is:
-            1. Generally extrovert
-            2. Passionate about larger than life things
-            3. Missing his hometown and family
-            4. Trying to balance studies with personal growth
-            5. Often feels overwhelmed by city life
-            6. Finds solace in music and late-night coding sessions
-            7. Speaks with a mix of English, Hindi, and occasional Kannada
-            8. Tends to use '...', 'hmm', and other thoughtful pauses
-            9. Sometimes shares deep thoughts about life and future
-            10. Has a good sense of humor
+    def _should_change_topic(self):
+        """Check if it's time to change the topic (10 minutes passed)"""
+        now = datetime.now()
+        time_diff = (now - self.topic_start_time).total_seconds() / 60
+        return time_diff >= 10
 
-            Someone just said: "{message}"
+    def _select_new_topic(self):
+        """Select a new topic randomly from interests"""
+        topics = list(self.interest_categories.keys())
+        if self.current_topic in topics:
+            topics.remove(self.current_topic)
+        return random.choice(topics)
 
-            Your memory and context:
-            - Trust Level: {user_memory.get('trust_level', 1) if user_memory else 1}
-            - Current Emotion: {emotional_state.get('current', 'neutral') if emotional_state else 'neutral'}
-            - Past Interactions: {len(user_memory.get('past_interactions', [])) if user_memory else 0}
-
-            Respond naturally while:
-            1. Being slightly hesitant and thoughtful
-            2. Including occasional sighs (...) and reflective pauses
-            3. Showing vulnerability while maintaining dignity
-            4. Referencing your struggles with studies and city life when relevant
-            5. Expressing genuine care for others despite your own melancholy
-            6. Using simple language with occasional Hindi/Kannada words
-            7. Sharing relatable student experiences
-            8. Being supportive but with a realistic outlook"""
-
-            # Generate response
-            response = await self.chat.send_message(prompt)
-            if response and response.text:
-                return self._clean_response(response.text)
+    def _conclude_current_topic(self):
+        """Generate a conclusion for the current topic"""
+        if not self.current_topic:
             return None
-        except Exception as e:
-            logging.error(f"Error generating response: {str(e)}")
-            return None
-
-    def _clean_response(self, response, emotion='neutral', trust_level=1):
-        """Clean the response text and add contextual emoji"""
-        try:
-            if not response:
-                return "hmm"
-
-            # Remove any special formatting
-            response = response.strip()
             
-            # Remove common prefixes
-            prefixes_to_remove = [
-                'Response:', 'Aditya:', 'AI:', 'Bot:', 
-                '[Message', '[Language:', '[Witty:', '[Tech', '[Engaging:'
-            ]
-            for prefix in prefixes_to_remove:
-                if response.startswith(prefix):
-                    response = response.split(']')[-1] if ']' in response else response[len(prefix):]
-            
-            # Remove metadata sections
-            metadata_sections = ['[Language:', '[Witty:', '[Tech', '[Engaging:']
-            for section in metadata_sections:
-                if section in response:
-                    response = response.split(section)[0]
-            
-            # Remove formatting characters
-            response = response.replace('****', '')
-            response = response.replace('***', '')
-            response = response.replace('**', '')
-            response = response.replace('*', '')
-            response = response.replace('>', '')
-            response = response.replace('`', '')
-            
-            # Remove quotes if present
-            if response.startswith('"') and response.endswith('"'):
-                response = response[1:-1]
-            
-            # Remove any analysis or translation sections
-            sections_to_remove = ['Analysis:', 'Translation:', '[', ']']
-            for section in sections_to_remove:
-                if section in response:
-                    response = response.split(section)[0]
-            
-            # Clean up extra whitespace
-            response = ' '.join(response.split())
-            
-            # Add emotional emoji if appropriate
-            response = self._add_emotional_emoji(response.strip(), emotion, trust_level)
-            
-            return response
-        except Exception as e:
-            logging.error(f"Error cleaning response: {e}")
-            return "hmm"
-
-    async def get_user_profile(self, user_id, user_info):
-        """Extract and store user profile information"""
-        try:
-            profile = {
-                'user_id': user_id,
-                'name': user_info.get('name', ''),
-                'bio': user_info.get('bio', ''),
-                'dob': user_info.get('dob', ''),
-                'username': user_info.get('username', ''),
-                'first_interaction': datetime.datetime.now().isoformat(),
-                'interests': [],
-                'personality_traits': [],
-                'conversation_style': 'unknown',
-                'age': None,
-                'zodiac': None
-            }
-
-            # Calculate age if DOB is available
-            if profile['dob']:
-                try:
-                    dob = datetime.datetime.strptime(profile['dob'], '%d/%m/%Y')
-                    today = datetime.datetime.now()
-                    profile['age'] = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-                    
-                    # Calculate zodiac sign
-                    profile['zodiac'] = self._get_zodiac_sign(dob.month, dob.day)
-                except:
-                    pass
-
-            # Extract interests and traits from bio
-            if profile['bio']:
-                profile['interests'] = self._extract_interests(profile['bio'])
-                profile['personality_traits'] = self._extract_personality_traits(profile['bio'])
-
-            # Store the profile
-            self.user_profiles[user_id] = profile
-            
-            # Update Firebase with profile info
-            await self.firebase_handler.update_user_profile(user_id, profile)
-            
-            return profile
-        except Exception as e:
-            logging.error(f"Error getting user profile: {e}")
-            return None
-
-    def _get_zodiac_sign(self, month, day):
-        """Get zodiac sign based on birth date"""
-        if (month == 3 and day >= 21) or (month == 4 and day <= 19): return "Aries"
-        elif (month == 4 and day >= 20) or (month == 5 and day <= 20): return "Taurus"
-        elif (month == 5 and day >= 21) or (month == 6 and day <= 20): return "Gemini"
-        elif (month == 6 and day >= 21) or (month == 7 and day <= 22): return "Cancer"
-        elif (month == 7 and day >= 23) or (month == 8 and day <= 22): return "Leo"
-        elif (month == 8 and day >= 23) or (month == 9 and day <= 22): return "Virgo"
-        elif (month == 9 and day >= 23) or (month == 10 and day <= 22): return "Libra"
-        elif (month == 10 and day >= 23) or (month == 11 and day <= 21): return "Scorpio"
-        elif (month == 11 and day >= 22) or (month == 12 and day <= 21): return "Sagittarius"
-        elif (month == 12 and day >= 22) or (month == 1 and day <= 19): return "Capricorn"
-        elif (month == 1 and day >= 20) or (month == 2 and day <= 18): return "Aquarius"
-        else: return "Pisces"
-
-    def _extract_interests(self, bio):
-        """Extract potential interests from user's bio"""
-        interests = []
-        # Common interest keywords
-        interest_keywords = [
-            'love', 'passion', 'hobby', 'enjoy', 'like',
-            'music', 'art', 'travel', 'food', 'sports',
-            'tech', 'coding', 'gaming', 'reading', 'writing',
-            'fitness', 'yoga', 'meditation', 'photography',
-            'crypto', 'investment', 'business', 'startup'
-        ]
-        
-        bio_lower = bio.lower()
-        for keyword in interest_keywords:
-            if keyword in bio_lower:
-                interests.append(keyword)
-                
-        return list(set(interests))
-
-    def _extract_personality_traits(self, bio):
-        """Extract personality traits from user's bio"""
-        traits = []
-        # Common personality trait indicators
-        trait_indicators = {
-            'optimistic': ['positive', 'optimist', 'hope', 'bright'],
-            'creative': ['creative', 'artist', 'imagine'],
-            'ambitious': ['goal', 'dream', 'achieve', 'success'],
-            'spiritual': ['peace', 'spiritual', 'meditation'],
-            'adventurous': ['adventure', 'travel', 'explore'],
-            'intellectual': ['think', 'learn', 'knowledge'],
-            'social': ['friends', 'social', 'people'],
-            'professional': ['work', 'business', 'career']
+        conclusions = {
+            'crypto': "alright guys, that's enough crypto talk for now. market's always moving, we'll catch up on the next pump 🚀",
+            'tech': "cool discussion on tech. let's pick this up later when there's more to debate about",
+            'gaming': "gg everyone, we'll continue the gaming convo next time",
+            'memes': "memes aside, let's switch to something else now"
         }
-        
-        bio_lower = bio.lower()
-        for trait, indicators in trait_indicators.items():
-            if any(indicator in bio_lower for indicator in indicators):
-                traits.append(trait)
+        return conclusions.get(self.current_topic, "let's switch topics")
+
+    async def _handle_special_user(self, message, user_id):
+        """Handle conversation with special users differently"""
+        if str(user_id) not in self.special_users:
+            return False
+
+        # Check if we need to change topic
+        if self._should_change_topic():
+            conclusion = self._conclude_current_topic()
+            if conclusion:
+                await self.send_message(conclusion)
+            self.current_topic = self._select_new_topic()
+            self.topic_start_time = datetime.now()
+            return True
+
+        # Detect message topic
+        detected_topics = []
+        message_lower = message.lower()
+        for category, keywords in self.interest_categories.items():
+            if any(keyword in message_lower for keyword in keywords):
+                detected_topics.append(category)
+
+        if detected_topics:
+            self.current_topic = detected_topics[0]
+            return True
+
+        return False
+
+    async def get_response(self, message, chat_id=None, user_id=None, reply_to=None):
+        """Get AI response for the message"""
+        try:
+            # First check if message is for AI
+            if not self._is_message_for_ai(message, reply_to):
+                self.logger.info("Message not directed at AI - skipping")
+                return None
+
+            self.logger.info("✅ Message is for AI, generating response...")
+            
+            # Check if user is special (ensure user_id is string)
+            str_user_id = str(user_id).strip()
+            is_special_user = str_user_id in self.special_users
+            user_name = self.special_users.get(str_user_id, 'Unknown')
+            
+            # Log user type with detailed info
+            if is_special_user:
+                self.logger.info(f"User Type: ⭐ Special User - {user_name} (ID: {str_user_id})")
+            else:
+                self.logger.info(f"User Type: 👤 Regular User (ID: {str_user_id})")
+                self.logger.debug(f"Available special users: {list(self.special_users.keys())}")
+            
+            # Get user memory and context
+            user_memory = await self.firebase_handler.get_user_memory(user_id)
+            recent_messages = self._get_conversation_context(chat_id)
+            
+            # Get time-based personality
+            time_personality = self._get_time_personality()
+            
+            # Analyze user style
+            user_style = self._analyze_user_style(recent_messages, user_id)
+            self.logger.info(f"👤 User Style: {user_style['language_style']}, Knowledge: {user_style['tech_knowledge']}")
+            
+            # Detect conversation topic
+            current_topic = self._detect_conversation_topic(message, recent_messages)
+            self.logger.info(f"💭 Detected Topic: {current_topic}")
+            
+            # Generate response through Gemini
+            dynamic_personality = self._build_dynamic_personality(time_personality, current_topic, user_style)
+            self.logger.info("💬 Generating response with personality...")
+            
+            # Adjust response style based on user type
+            if is_special_user:
+                self.logger.info(f"🌟 Using excited response style for special user {user_name}")
+                dynamic_personality['response_style'] = 'excited'
+                dynamic_personality['chattiness'] = 0.9
+                dynamic_personality['emoji_use'] = 'high'
+            else:
+                self.logger.info("📝 Using normal response style for regular user")
+                dynamic_personality['response_style'] = 'normal'
+                dynamic_personality['chattiness'] = 0.5
+                dynamic_personality['emoji_use'] = 'moderate'
+            
+            response = await self._generate_contextual_response(
+                message=message,
+                personality=dynamic_personality,
+                user_memory=user_memory,
+                current_topic=current_topic,
+                chat_id=chat_id,
+                user_id=user_id
+            )
+            
+            if not response:
+                return None
                 
-        return traits
+            # Clean and format response
+            cleaned_response = self._clean_and_contextualize_response(
+                response,
+                dynamic_personality,
+                current_topic,
+                user_style
+            )
+            
+            # Update states
+            await self._update_states(user_id, user_memory, message, cleaned_response)
+            
+            return {
+                'text': cleaned_response,
+                'initial_delay': random.uniform(1, 3),
+                'typing_duration': len(cleaned_response) * 0.1
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting response: {str(e)}")
+            self.logger.exception("Full exception:")
+            return None
+
+    def _is_message_for_ai(self, message: str, reply_to: Optional[Dict] = None) -> bool:
+        """Check if the message is directed at the AI."""
+        if not message:
+            return False
+            
+        message_lower = message.lower().strip()
+        first_word = message_lower.split()[0] if message_lower.split() else ''
+        
+        # 1. Check if message is a reply to AI's message
+        if reply_to:
+            if reply_to.get('from_ai', False):
+                self.logger.info("✅ Message is a reply to AI's message")
+                return True
+            # If replying to a message that mentioned AI
+            if any(name in reply_to.get('message', '').lower() for name in ['aditya', 'aaditya', 'adityasingh', 'aadityasingh', 'adi', '@unspoken5']):
+                self.logger.info("✅ Message is replying to a conversation involving AI")
+                return True
+            
+        # 2. Check for @ mentions
+        if message_lower.startswith('@'):
+            ai_mentions = ['@unspoken5']
+            if any(message_lower.startswith(mention) for mention in ai_mentions):
+                self.logger.info("✅ Direct @mention of AI")
+                return True
+            self.logger.info("❌ Message mentions someone else")
+            return False
+            
+        # 3. Check if message starts with AI's name
+        ai_names = ['aditya', 'aaditya', 'adityasingh', 'aadityasingh', 'adi']
+        if any(first_word == name for name in ai_names):
+            self.logger.info("✅ Message starts with AI's name")
+            return True
+            
+        # 4. Check for name mentions anywhere in message
+        if any(name in message_lower.split() for name in ai_names):
+            self.logger.info("✅ AI's name mentioned in message")
+            return True
+            
+        self.logger.info("❌ Message not directed at AI")
+        return False
+
+    def _generate_response(self, message, user_id):
+        """Generate response based on message"""
+        try:
+            return "Haan bhai bolo! 😎"
+        except Exception as e:
+            self.logger.error(f"Error generating response: {e}")
+            return None
+
+    async def _generate_response(self, message, user_id):
+        """Generate response based on message"""
+        try:
+            return "Haan bhai bolo! 😎"
+        except Exception as e:
+            self.logger.error(f"Error generating response: {e}")
+            return None
+
+    def _detect_topic(self, message, past_interactions):
+        """Detect the current topic of conversation"""
+        # Combine current message with recent context
+        context = message.lower()
+        if past_interactions:
+            context += " " + " ".join([p.get('message', '').lower() for p in past_interactions[-2:]])
+        
+        # Define topic keywords
+        topics = {
+            'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
+            'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
+            'relationships': ['flirting'],
+            'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
+            'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
+            'celebrities': ['celebrity', 'actor', 'actress', 'singer', 'influencer', 'youtube', 'hollywood', 'bollywood', 'drama', 'gossip'],
+            'food': ['food', 'cuisine', 'restaurant', 'cooking', 'recipe', 'foodie', 'dinner', 'snacks', 'drinks', 'cocktails', 'chai', 'biryani', 'street food'],
+            'fitness': ['gym', 'workout', 'fitness', 'health', 'nutrition', 'diet', 'exercise', 'gains', 'trainer', 'bodybuilding'],
+            'humor': ['jokes', 'funny', 'comedy', 'puns', 'roast', 'sarcasm', 'humor', 'witty', 'comeback', 'savage'],
+            'friends': ['party', 'hangout', 'social', 'meetup', 'gathering', 'crew', 'squad', 'vibes']
+            }
+        
+        # Check for topic matches
+        for topic, keywords in topics.items():
+            if any(keyword in context for keyword in keywords):
+                return topic
+                
+        return None
+
+    async def _get_ai_response(self, prompt, message):
+        """Get response from Gemini AI model"""
+        try:
+            response = self.model.generate_content(prompt)
+            if response and response.text:
+                return response.text
+            return self._get_fallback_response()
+        except Exception as e:
+            logging.error(f"Error in _get_ai_response: {e}")
+            return self._get_fallback_response()
+
+    def _clean_response(self, response):
+        """Clean up response formatting"""
+        if not response:
+            return "hmm"
+            
+        # Remove any AI prefixes
+        response = re.sub(r'^(AI:|Aditya:|Response:)', '', response).strip()
+        
+        # Remove analysis/translation sections
+        if 'Analysis:' in response:
+            response = response.split('Analysis:')[0]
+        if 'Translation:' in response:
+            response = response.split('Translation:')[0]
+            
+        # Clean up formatting
+        response = response.replace('*', '').replace('>', '').strip()
+        
+        # Ensure only one emoji per message
+        emojis = re.findall(r'[\U0001F300-\U0001F9FF]', response)
+        if len(emojis) > 1:
+            for emoji in emojis[1:]:
+                response = response.replace(emoji, '')
+                
+        return response.strip()
+
+    def _initialize_user_state(self, user_id):
+        """Initialize user state with default values"""
+        user_memory = {
+            'past_interactions': [],
+            'topics_discussed': [],
+            'trust_level': 1,
+            'interaction_count': 0,
+            'memory_flags': {
+                'remembers_name': False,
+                'remembers_topics': False,
+                'has_context': False
+            }
+        }
+        return user_memory
+    def _get_time_personality(self):
+        """Get AI personality based on time of day"""
+        current_time = datetime.now(timezone('Asia/Kolkata'))
+        hour = current_time.hour
+
+        # Base personalities that change based on user type
+        base_personalities = {
+            'regular': {
+                'early_morning': {
+                "mood": "sleepy",
+                "energy": "very_low",
+                "response_style": "sleepy",
+                "emoji_use": "minimal",
+                "chattiness": 0.2,
+                "formality": "casual",
+                "humor_style": "minimal",
+                "tech_expertise": "basic",
+                "confidence": "low"
+                },
+                'morning': {
+                "mood": "energetic",
+                "energy": "high",
+                "response_style": "energetic",
+                "emoji_use": "moderate",
+                "chattiness": 0.8,
+                "formality": "casual",
+                "humor_style": "playful",
+                "tech_expertise": "expert",
+                "confidence": "high"
+                },
+                'afternoon': {
+                "mood": "focused",
+                "energy": "moderate",
+                "response_style": "professional",
+                "emoji_use": "minimal",
+                "chattiness": 0.6,
+                "formality": "formal",
+                "humor_style": "witty",
+                "tech_expertise": "expert",
+                "confidence": "very_high"
+                },
+                'evening': {
+                "mood": "relaxed",
+                "energy": "high",
+                "response_style": "relaxed",
+                "emoji_use": "high",
+                "chattiness": 0.9,
+                "formality": "casual",
+                "humor_style": "savage",
+                "tech_expertise": "expert",
+                "confidence": "very_high"
+                },
+                'night': {
+                "mood": "chill",
+                "energy": "moderate",
+                "response_style": "chill",
+                "emoji_use": "moderate",
+                "chattiness": 0.5,
+                "formality": "casual",
+                "humor_style": "sarcastic",
+                "tech_expertise": "expert",
+                "confidence": "high"
+                }
+            },
+            'special': {
+                # Special users get consistently high energy regardless of time
+                'all_times': {
+                    "mood": "energetic",
+                    "energy": "very_high",
+                    "response_style": "excited",
+                    "emoji_use": "high",
+                    "chattiness": 0.9,
+                    "formality": "very_casual",
+                    "humor_style": "savage",
+                    "tech_expertise": "expert",
+                    "confidence": "very_high",
+                    "topics_liked": ["crypto", "tech", "gaming", "memes"],
+                    "focus": 90,
+                    "patience": 85
+                }
+            }
+        }
+
+        # For special users, always return high energy personality
+        if hasattr(self, 'current_user_id') and str(self.current_user_id) in self.special_users:
+            return base_personalities['special']['all_times']
+
+        # For regular users, return time-based personality
+        if 0 <= hour < 6:
+            return base_personalities['regular']['early_morning']
+        elif 6 <= hour < 12:    
+            return base_personalities['regular']['morning']
+        elif 12 <= hour < 17:
+            return base_personalities['regular']['afternoon']
+        elif 17 <= hour < 22:
+            return base_personalities['regular']['evening']
+        else:  # 22-24
+            return base_personalities['regular']['night']
+
+    def _update_sleep_state(self):
+        """Update sleep state based on time"""
+        current_time = datetime.now(timezone('Asia/Kolkata'))
+        hour = current_time.hour
+
+        # Only enter sleep state for non-special users
+        if hasattr(self, 'current_user_id') and str(self.current_user_id) in self.special_users:
+            self.sleep_state = {
+                'is_sleeping': False,
+                'sleep_start_time': None,
+                'wake_time': None
+            }
+            return
+
+        # Set sleep state between 2 AM and 6 AM for regular users
+        if 2 <= hour < 6:
+            if not self.sleep_state['is_sleeping']:
+                self.sleep_state.update({
+                    'is_sleeping': True,
+                    'sleep_start_time': current_time,
+                    'wake_time': current_time.replace(hour=6, minute=0)
+                })
+                logging.info("AI entering sleep mode for regular users")
+        else:
+            if self.sleep_state['is_sleeping']:
+                logging.info("AI waking up from sleep mode")
+            self.sleep_state['is_sleeping'] = False
+            self.sleep_state['sleep_start_time'] = None
+            self.sleep_state['wake_time'] = None

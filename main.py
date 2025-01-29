@@ -14,22 +14,59 @@ from aiohttp import web
 import threading
 from telethon.sessions import StringSession
 
+# Load environment variables first
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    force=True  # Force reconfiguration of the root logger
 )
+
+# Create console handler with custom formatter
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.handlers = []  # Remove existing handlers
+root_logger.addHandler(console_handler)
+
+# Set logging levels for all loggers
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logging.getLogger('aiohttp').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('ai_handler').setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Ensure our logs are always shown
+for handler in logging.root.handlers:
+    handler.setLevel(logging.INFO)
+
+# Verify environment variables are loaded
+logger.info("Verifying environment variables...")
+required_vars = [
+    'API_ID', 'API_HASH', 'PHONE_NUMBER', 'SESSION_STRING',
+    'CHATTER_ID1', 'CHATTER_ID2', 'CHATTER_ID3', 'CHATTER_ID4', 'CHATTER_ID5',
+    'CHATTER_NAME1', 'CHATTER_NAME2', 'CHATTER_NAME3', 'CHATTER_NAME4', 'CHATTER_NAME5'
+]
+
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    logger.warning(f"Missing environment variables: {', '.join(missing_vars)}")
+else:
+    logger.info("✅ All required environment variables are present")
+
+# Get environment variables
 API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER')
 PORT = int(os.getenv('PORT', 8080))
-SESSION_STRING = os.getenv('SESSION_STRING')  # New environment variable for session string
-
-# Get default group ID from environment variables
+SESSION_STRING = os.getenv('SESSION_STRING')
 DEFAULT_GROUP_ID = int(os.getenv('DEFAULT_GROUP_ID', '-4666305725'))
 
 async def health_check(request):
@@ -192,98 +229,63 @@ class UserBot:
         @self.client.on(events.NewMessage)
         async def handle_messages(event):
             try:
-                # Get message sender
-                sender = await event.get_sender()
-                
+                # Skip if not in selected group or responding disabled
+                if event.chat_id != self.selected_group_id or not self.is_responding:
+                    return
+
+                # Get message text
                 message_text = event.message.text
                 if not message_text:
                     return
 
-                # Handle commands only from admin
-                if message_text.startswith('/'):
-                    if event.sender_id != self.admin_id:
-                        await event.reply("Only admin can use commands")
-                        return
+                # Get user ID and check if special
+                user_id = event.sender_id
+                is_special_user = str(user_id) in self.ai_handler.special_users
+                logger.info(f"Message from {'⭐ Special User' if is_special_user else '👤 Regular User'} (ID: {user_id})")
 
-                    # Check for command messages
-                    command = message_text.split()[0].lower()
-                    args = message_text.split()[1:] if len(message_text.split()) > 1 else []
-
-                    if command == '/help':
-                        await self.show_help(event)
-                    elif command == '/status':
-                        await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
-                    elif command == '/stop':
-                        self.is_responding = False
-                        await event.reply("Stopped responding in current group")
-                    elif command == '/start':
-                        self.is_responding = True
-                        await event.reply("Started responding in current group")
-                    elif command == '/setgroup':
-                        if args:
-                            try:
-                                new_group_id = int(args[0])
-                                self.selected_group_id = new_group_id
-                                await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
-                            except ValueError:
-                                await event.reply("Please provide a valid group ID")
-                        else:
-                            await event.reply("Usage: /setgroup -123456789")
-                    elif command == '/context':
-                        if not args:
-                            current_context = self.ai_handler.context_manager.get_current_context()
-                            await event.reply(f"Current context:\n{current_context}")
-                        else:
-                            context_name = args[0].lower()
-                            if self.ai_handler.context_manager.set_context(context_name):
-                                await event.reply(f"Context changed to: {context_name}")
-                            else:
-                                await event.reply(f"Context '{context_name}' not found")
-                    elif command == '/contexts':
-                        contexts = self.ai_handler.context_manager.list_contexts()
-                        await event.reply("Available contexts:\n" + "\n".join(f"- {ctx}" for ctx in contexts))
-                    elif command == '/resetcontext':
-                        self.ai_handler.reset_chat()
-                        await event.reply("Chat reset with current context")
-                    return  # Exit after handling command
-
-                # Only respond in selected group and if responding is enabled
-                if event.chat_id != self.selected_group_id:
-                    return
-
-                if not self.is_responding:
-                    return
+                # Get reply information
+                reply_to = None
+                if event.reply_to:
+                    reply_msg = await event.get_reply_message()
+                    if reply_msg:
+                        # Check if the message is from the AI (our bot)
+                        is_from_ai = False
+                        if hasattr(reply_msg.sender, 'id'):
+                            me = await self.client.get_me()
+                            is_from_ai = reply_msg.sender.id == me.id
+                        
+                        reply_to = {
+                            'message': reply_msg.text,
+                            'from_ai': is_from_ai
+                        }
+                        logger.info(f"Reply detected - from_ai: {is_from_ai}")
 
                 # Get AI response
-                response_data = await self.ai_handler.get_response(message_text, event.chat_id, event.sender_id)
+                response_data = await self.ai_handler.get_response(
+                    message=message_text,
+                    chat_id=event.chat_id,
+                    user_id=user_id,
+                    reply_to=reply_to
+                )
                 
                 if response_data:
-                    # Clean up formatting from response while preserving content
-                    response_text = response_data['text']
-                    response_text = response_text.replace('****', '')  # Remove asterisks
-                    response_text = response_text.replace('***', '')
-                    response_text = response_text.replace('**', '')
-                    response_text = response_text.replace('*', '')
-                    response_text = response_text.strip()
+                    logger.info(f"Sending response: {response_data['text']}")
                     
-                    logger.info(f"AI response: {response_text}")
-                    
-                    # Initial human-like delay
+                    # Add initial delay
                     await asyncio.sleep(response_data['initial_delay'])
                     
                     # Simulate typing
                     async with self.client.action(event.chat_id, 'typing'):
                         await asyncio.sleep(response_data['typing_duration'])
+                        await event.reply(response_data['text'])
                         
-                        # Send the response
-                        await event.reply(response_text)
-                        logger.info("Reply sent successfully")
+                    logger.info("Reply sent successfully")
                 else:
                     logger.debug("No response generated")
 
             except Exception as e:
-                logger.error(f"Error processing message: {str(e)}")
-                logger.exception("Full exception:")
+                logger.error(f"Error in message handler: {str(e)}")
+                logger.exception("Full traceback:")
 
         logger.info("Userbot started successfully!")
         logger.info("Available commands:")

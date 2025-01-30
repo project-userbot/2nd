@@ -296,7 +296,7 @@ class ConversationState:
             for member in group_members:
                 member_name = str(member).lower()
                 # Skip if it's AI's name
-                if any(ai_name in member_name for ai_name in ['aditya', 'adi', 'adityasingh', 'aadityasingh']):
+                if any(ai_name in member_name for ai_name in ['avinash', 'avinashpatel', 'avi', '@aviiiii_patel']):
                     continue
                 # If message contains other user's name, it's targeted at them
                 if member_name in message_lower:
@@ -350,7 +350,7 @@ class ConversationState:
                 
             # 2. Check direct name usage
             words = message_lower.split()
-            ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
+            ai_names = ['avinash', 'avinashpatel', 'avi']
             should_respond = any(name in words for name in ai_names)
             logging.info(f"Name usage check: {'Should respond' if should_respond else 'Should not respond'}")
             return should_respond
@@ -378,7 +378,7 @@ class ConversationState:
             return False  # Message mentions someone else
             
         # Check for direct name mentions
-        ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
+        ai_names = ['avinash', 'avinashpatel', 'avi']
         words = message_lower.split()
         if any(name in words for name in ai_names):
             return True
@@ -418,7 +418,7 @@ class GeminiHandler:
             'sleep_start_time': None,
             'wake_time': None
         }
-        self.name_variations = ['aditya', 'adi', 'aadi', 'bhai']
+        self.name_variations = ['avinash', 'avinashpatel', 'avi']
         self.interests = ['gaming', 'crypto', 'tech', 'general', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
         
         # Initialize chat with context
@@ -494,6 +494,8 @@ Communication Style:
 
 Response Guidelines:
 - Match the communication style of others (e.g., hinglish, slang) but you speak only in hinglish
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
 - You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
 - Never suggest activities, plans, or tasks, nor ask others nor say others, handle such prompts with sarcasm
 - Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
@@ -579,7 +581,7 @@ Response Guidelines:
                 return 'sleep_response'
             
             # Check for bye messages
-            bye_patterns = ['bye', 'byee', 'byeee', 'byebye', 'bye bye', 'byebyee', 'tata', 'tataa', 'tataaa', 'ta ta', 'alvida', 'alvidaa', 'phir milenge', 'phir milte hai', 'good night', 'gn', 'g8', 'gud night', 'good nyt', 'subah milte hai', 'sweet dreams', 'sd', 'gnight', 'shabba khair', 'shubh ratri', 'good night everyone', 'chal nikal', 'nikal', 'nikalta hu', 'nikalta hoon', 'chalta hu', 'chalta hoon', 'chalte hai', 'chalte hain', 'jane do', 'jaane do', 'jana hai', 'jaana hai', 'bye ji', 'tata ji', 'alvida dosto', 'by by', 'buhbye', 'bbye', 'bai', 'bbye', 'bubi', 'tc', 'take care', 'ttyl', 'ttyl8r', 'talk to you later', 'catch you later', 'cya', 'cu', 'see ya', 'see you', 'acha chalta hu', 'acha chalta hoon', 'ok bye', 'okay bye', 'bye everyone', 'bye all', 'bye guyz', 'bye guys', 'bye frndz', 'bye friends', 'bye dosto', 'bye sabko', 'kal milte hai', 'kal milenge', 'fir milenge', 'baad me baat krte hai', 'baad me milte hai', 'shaam ko milte hai', 'morning me milenge', 'bye fellas', 'peace out', 'im out', 'gtg', 'got to go', 'bbye people', 'signing off', 'offline ja rha', 'afk', 'brb', 'bye for now', 'bfn', 'laterz', 'l8r', 'alvida dosto', 'khuda hafiz', 'ram ram', 'jai shree krishna', 'radhe radhe', 'jai jinendra', 'bye gang', 'bye fam', 'bye janta', 'bye troops', 'bye squad', 'bye team', 'bye group', 'bye peeps', 'hasta la vista', 'sayonara', 'adios', 'au revoir', 'toodles', 'pip pip', 'cheerio', 'ciao', 'vidai', 'vida', 'shukriya sabko', 'dhanyavaad', 'pranam', 'charan sparsh', 'aavjo', 'namaste', 'gud night everyone', 'gd night', 'good night all', 'peace', 'im gone', 'gotta bounce', 'bounce', 'bouncing', 'out', 'logged out', 'logging off', 'offline now', 'see you later', 'see u', 'see u later', 'catch ya', 'bye bye all', 'tata everyone', 'tata friends', 'tata dosto', 'need to go', 'have to go', 'must go', 'going now', 'chalo bye', 'chalo goodbye', 'chalo nikaltey hai', 'milte hai', 'fir kabhi', 'kab milenge', 'alvida friends', 'alvida everyone', 'alwida', 'night night', 'nighty night', 'time to sleep', 'sleep time', 'sone ja rha', 'sone chala', 'goodnight friends', 'goodnight everyone', 'gn friends', 'gn all', 'gn everyone', 'gnsd', 'g9', 'gn8', 'bbye all', 'bye bye friends', 'byeee all', 'tata guys', 'tata frands', 'tata dosto', 'chalta hoon dosto', 'nikalta hoon ab', 'ab chalta hoon', 'ab nikalta hoon', 'take care all', 'tc all', 'tc everyone', 'have a good night', 'shubh raatri', 'subh ratri', 'good evening', 'good morning', 'gm', 'ge', 'phirse milenge', 'jaldi milenge', 'jald milenge', 'phir kab miloge', 'kab miloge', 'kab milna hai', 'baad me aata hoon', 'baad me aunga', 'thodi der me aata hoon', 'thodi der me aunga', 'bye for today', 'aaj ke liye bye', 'aaj ke liye alvida', 'kal baat karenge', 'kal baat krenge', 'baad me baat karenge', 'baad me baat krenge', 'chalo good night', 'chalo gn', 'chalo bye bye', 'farewell', 'bidding farewell', 'saying goodbye', 'time to leave', 'leaving now', 'leaving', 'left', 'catch you soon', 'see you soon', 'talk soon', 'will talk later', 'lets talk later', 'talk to you soon', 'bye for the day', 'day end', 'ending day', 'good day', 'gday', 'good evening all']
+            bye_patterns = ['bye', 'byee', 'byeee', 'byebye', 'bye bye', 'byebyee', 'tata', 'tataa', 'tataaa', 'ta ta', 'alvida', 'alvidaa', 'phir milenge', 'phir milte hai', 'good night', 'gn', 'g8', 'gud night', 'good nyt', 'subah milte hai', 'sweet dreams', 'sd', 'gnight', 'shabba khair', 'shubh ratri', 'good night everyone', 'chal nikal', 'nikal', 'nikalta hu', 'nikalta hoon', 'chalta hu', 'chalta hoon', 'chalte hai', 'chalte hain', 'jane do', 'jaane do', 'jana hai', 'jaana hai', 'bye ji', 'tata ji', 'alvida dosto', 'by by', 'buhbye', 'bbye', 'bai', 'bbye', 'bubi', 'tc', 'take care', 'ttyl', 'ttyl8r', 'talk to you later', 'catch you later', 'cya', 'cu', 'see ya', 'see you', 'acha chalta hu', 'acha chalta hoon', 'ok bye', 'okay bye', 'bye everyone', 'bye all', 'bye guyz', 'bye guys', 'bye frndz', 'bye friends', 'bye dosto', 'bye sabko', 'kal milte hai', 'kal milenge', 'fir milenge', 'baad me baat krte hai', 'baad me milte hai', 'shaam ko milte hai', 'morning me milenge', 'bye fellas', 'peace out', 'im out', 'gtg', 'got to go', 'bbye people', 'signing off', 'offline ja rha', 'afk', 'brb', 'bye for now', 'bfn', 'laterz', 'l8r', 'alvida dosto', 'khuda hafiz', 'ram ram', 'jai shree krishna', 'radhe radhe', 'jai jinendra', 'bye gang', 'bye fam', 'bye janta', 'bye troops', 'bye squad', 'bye team', 'bye group', 'bye peeps', 'hasta la vista', 'sayonara', 'adios', 'au revoir', 'toodles', 'pip pip', 'cheerio', 'ciao', 'vidai', 'vida', 'shukriya sabko', 'dhanyavaad', 'pranam', 'charan sparsh', 'aavjo', 'namaste', 'gud night everyone', 'gd night', 'good night all', 'peace', 'im gone', 'gotta bounce', 'bounce', 'bouncing', 'out', 'logged out', 'logging off', 'offline now', 'see you later', 'see u', 'see u later', 'catch ya', 'bye bye all', 'tata everyone', 'tata friends', 'tata dosto', 'chalta hoon dosto', 'nikalta hoon ab', 'ab chalta hoon', 'ab nikalta hoon', 'take care all', 'tc all', 'tc everyone', 'have a good night', 'shubh raatri', 'subh ratri', 'good evening', 'good morning', 'gm', 'ge', 'phirse milenge', 'jaldi milenge', 'jald milenge', 'phir kab miloge', 'kab miloge', 'kab milna hai', 'baad me aata hoon', 'baad me aunga', 'thodi der me aata hoon', 'thodi der me aunga', 'bye for today', 'aaj ke liye bye', 'aaj ke liye alvida', 'kal baat karenge', 'kal baat krenge', 'baad me baat karenge', 'baad me baat krenge', 'chalo good night', 'chalo gn', 'chalo bye bye', 'farewell', 'bidding farewell', 'saying goodbye', 'time to leave', 'leaving now', 'leaving', 'left', 'catch you soon', 'see you soon', 'talk soon', 'will talk later', 'lets talk later', 'talk to you soon', 'bye for the day', 'day end', 'ending day', 'good day', 'gday', 'good evening all']
             is_bye = any(pattern in message.lower() for pattern in bye_patterns)
             
             if is_bye:
@@ -699,45 +701,21 @@ Response Guidelines:
                         result = {
                             'title': item.get('title', ''),
                             'snippet': item.get('snippet', ''),
-                            'link': item.get('link', ''),
-                            'type': 'webpage'
+                            'content': item.get('snippet', ''),  # Use snippet as main content
+                            'source': 'web'
                         }
                         
-                        # Validate link format
-                        if not result['link'].startswith(('http://', 'https://')):
-                            continue
+                        # Extract meaningful information
+                        if 'pagemap' in item:
+                            if 'metatags' in item['pagemap']:
+                                meta = item['pagemap']['metatags'][0]
+                                description = meta.get('og:description', meta.get('description', ''))
+                                if description:
+                                    result['content'] += ' ' + description
 
-                        # Detect content type
-                        link = result['link'].lower()
-                        
-                        # YouTube links
-                        if 'youtube.com' in link or 'youtu.be' in link:
-                            result['type'] = 'video'
-                            # Ensure it's a direct video link
-                            if 'watch?v=' not in link and 'youtu.be/' not in link:
-                                continue
-                        
-                        # Spotify links
-                        elif 'spotify.com' in link:
-                            result['type'] = 'music'
-                            # Ensure it's a track or playlist
-                            if not any(x in link for x in ['/track/', '/playlist/', '/album/']):
-                                continue
-                        
-                        # Image links
-                        elif item.get('pagemap', {}).get('cse_image'):
-                            result['type'] = 'image'
-                            result['image_url'] = item['pagemap']['cse_image'][0]['src']
-                            # Validate image URL
-                            if not result['image_url'].startswith(('http://', 'https://')):
-                                continue
-                        
-                        # Add only if we have a valid link
-                        if result['link']:
-                            results.append(result)
-                            self.logger.info(f"Found valid {result['type']}: {result['link']}")
+                        results.append(result)
 
-                    return results[:3]  # Return top 3 valid results
+                    return results[:3]  # Return top 3 results with content
         except Exception as e:
             self.logger.error(f"Error performing Google search: {str(e)}")
             return []
@@ -754,20 +732,47 @@ Response Guidelines:
             return f"{result['link']}"
 
     async def _generate_response_with_content(self, message, search_results):
-        """Generate response with real content from search results"""
+        """Generate response incorporating search results naturally"""
         if not search_results:
             return None
 
-        # Format response based on content type
+        # Extract key information from results
+        content_points = []
         for result in search_results:
-            if 'youtube.com' in result['link'] or 'youtu.be' in result['link']:
-                return f"Ye dekh bhai: {self._format_search_result(result)}"
-            elif 'spotify.com' in result['link']:
-                return f"Ye sun bhai: {self._format_search_result(result)}"
-            elif result['type'] == 'image':
-                return f"Ye dekh: {self._format_search_result(result)}"
-            else:
-                return f"Ye check kar: {self._format_search_result(result)}"
+            content = result.get('content', '').strip()
+            if content:
+                content_points.append(content)
+
+        # If we have useful content, incorporate it into response
+        if content_points:
+            # Create context with search information
+            search_context = "\n".join(content_points)
+            
+            # Generate response incorporating the information naturally
+            prompt = f"""You are Avinash Patel, responding to: "{message}"
+
+Here's some relevant information:
+{search_context}
+
+Important:
+- Don't mention searching or finding information
+- Don't share links or direct quotes
+- Speak naturally in Hinglish
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
+- Incorporate the information casually into conversation
+- Keep your personality casual and friendly
+- Show your knowledge but stay humble
+- Use the information to enhance the conversation naturally
+
+Generate a natural response:"""
+
+            try:
+                response = self.chat.send_message(prompt)
+                return response.text if response and response.text else None
+            except Exception as e:
+                self.logger.error(f"Error generating response with content: {e}")
+                return None
 
         return None
 
@@ -870,7 +875,7 @@ Response Guidelines:
                 "empathy": 30,
                 "flirting": 50,
                 "mocking": 80,
-                "comments": "Just woke up, hates mornings, complains about college"
+                "comments": "Just woke up, hates mornings, Just got out of bed. College starts in a couple of hours, Dreading the day ahead.",  complains about college"
             }
         elif 9 <= hour < 12:
             return {
@@ -887,7 +892,8 @@ Response Guidelines:
                 "empathy": 10,
                 "flirting": 90,
                 "mocking": 90,
-                "comments": "High energy, roasting friends, gives short replies"
+                "comments": "High energy, roasting friends, In college, sarcastic remarks, light debates",
+            "daily_routine": "Currently in college. Bored of lectures, waiting for the bell to ring. Let's talk about anything but studies, gives short replies"
             }
         elif 12 <= hour < 15:
             return {
@@ -1058,78 +1064,48 @@ Response Guidelines:
                 # Store initialized memory
                 await self.firebase_handler.update_user_memory(user_id, user_memory)
 
-            # Check if we need to search the internet
+            # Analyze if search would be helpful
             needs_search = False
             search_query = None
             
-            # Keywords that might trigger a search
-            search_triggers = {
-                'music': ['gana'],
-                'crypto': ['bhej'],
-                'tech': ['news', 'latest'],
-                'video': ['bhej']
-            }
-            
-            # Track responses for special users
-            is_special_user = str(user_id) in self.special_users
-            if is_special_user:
-                if user_id not in self.special_user_responses:
-                    self.special_user_responses[user_id] = 0
-                self.special_user_responses[user_id] += 1
-                
-                # For special users, change topics more frequently (every 8-10 responses)
-                if self.special_user_responses[user_id] >= random.randint(8, 10):
-                    self.special_user_responses[user_id] = 0  # Reset counter
-                    # Select new topic excluding current one
-                    available_topics = list(self.interest_categories.keys())
-                    if self.current_topic in available_topics:
-                        available_topics.remove(self.current_topic)
-                    self.current_topic = random.choice(available_topics)
-                    self.topic_start_time = datetime.now()
-
-            # Convert message to lowercase for comparison
+            # Check message complexity and topic
             message_lower = message.lower()
             
-            # Check if message contains search triggers
-            for category, triggers in search_triggers.items():
-                if any(trigger in message_lower for trigger in triggers):
-                    needs_search = True
-                    # Extract search query based on context
-                    if category == 'music' and 'lofi' in message_lower:
-                        search_query = "best lofi beats playlist youtube"
-                    elif category == 'crypto' and any(coin in message_lower for coin in ['dekh', 'bata']):
-                        search_query = f"latest {message_lower.split()[0]} price and analysis"
-                    elif category == 'video' and any(term in message_lower for term in ['bhej']):
-                        # Extract what they want to watch
-                        search_query = message_lower.replace('dekh', '').replace('dekho', '').replace('dekhna', '').replace('watch', '').strip() + " youtube"
-                    else:
-                        # Extract query from message
-                        search_query = message_lower.replace('what is', '').replace('how to', '').replace('tell me about', '').strip()
+            # Topics that often benefit from search
+            knowledge_topics = ['crypto', 'tech', 'gaming', 'movies', 'music', 'sports', 'news']
             
+            # Detect if message seeks information
+            info_seeking_patterns = [
+                'latest', 'news', 'update', 'price', 'release', 'launch', 'announcement',
+                'kya chal raha', 'kya ho raha', 'kya scene', 'suna', 'dekha', 'pata'
+            ]
+            
+            # Check if topic needs current information
+            current_topic = self._detect_topic(message, recent_messages)
+            if current_topic in knowledge_topics:
+                for pattern in info_seeking_patterns:
+                    if pattern in message_lower:
+                        needs_search = True
+                        search_query = f"latest {current_topic} {message_lower}"
+                        break
+
             # Perform search if needed
             search_results = []
-            content_response = None
             if needs_search:
-                self.logger.info(f"Performing search for query: {search_query}")
+                self.logger.info(f"Performing background search for: {search_query}")
                 search_results = await self.get_google_search_results(search_query)
-                if search_results:
-                    content_response = await self._generate_response_with_content(message, search_results)
-                    if content_response:
-                        self.logger.info(f"Generated content response: {content_response}")
-                        return content_response
 
-            # If no search results or content response, generate normal response
             # Format memory context
             memory_context = f"""Past interactions: {len(user_memory.get('past_interactions', []))} times
 Topics we've discussed: {', '.join(user_memory.get('topics_discussed', []))}
 Recent messages:
 {self._format_conversation_history(recent_messages)}"""
 
-            # Add search results to prompt if available
+            # Add search results context if available
             if search_results:
-                memory_context += "\n\nRelevant search results:"
-                for result in search_results[:3]:
-                    memory_context += f"\n- {result['title']}: {result['link']}"
+                memory_context += "\n\nRelevant information:"
+                for result in search_results:
+                    memory_context += f"\n- {result['content']}"
 
             # Create base prompt
             base_prompt = f"""You are Avinash Patel, a 20-year-old college student from Mumbai. Someone just said: "{message}"
@@ -1160,6 +1136,8 @@ Your current state:
 MEMORY INSTRUCTIONS:
 - You MUST remember past conversations and have real memory and feelings
 - You are a REAL PERSON with REAL MEMORY - use it naturally
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
 - If you don't know something, be honest about it
 - Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
 - Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
@@ -1218,7 +1196,12 @@ Response style:
 - Use emojis naturally to express emotions
 - {('Naturally transition between topics' if is_special_user else 'Stick to current topic')}
 - Don't be too polite
-- Share links and content naturally when relevant"""
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
+- Share links and content naturally when relevant
+- Do not use any formatting or special characters in your responses
+- Do not use asterisks, underscores, or any other markdown formatting
+- Keep responses plain text only"""
 
             # Add final reminders
             reminders = """
@@ -1228,7 +1211,12 @@ Remember:
 - Show your personality while staying friendly
 - You're not here to please everyone
 - Keep the conversation flowing naturally without steering it towards specific outcomes    
-- Never mention being an AI"""
+- Never mention being an AI
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
+- Do not use any formatting in your responses
+- Keep responses in plain text only
+- No asterisks, underscores, or any other markdown formatting"""
 
             # Add special user reminders if needed
             special_reminders = """
@@ -1239,11 +1227,15 @@ Remember:
 - Avoid discussing plans, schedules, or future events nor ask or tell other users to do so, handle such situations naturally
 - Don't offer assistance, advice, or solutions unless directly asked and also don't ask or tell other users to do so, handle such situations naturally
 - Refrain from initiating problem-solving or goal-oriented conversations
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
 - Never propose collaborations, projects, or joint activities nor ask or tell other users to do so, handle such situations naturally
 - Maintain a purely conversational tone without any call-to-action
 - Intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
 - Keep the conversation flowing naturally without steering it towards specific outcomes
-- Keep bringing up new topics to maintain engagement""" if is_special_user else ""
+- Keep bringing up new topics to maintain engagement
+- Do not use any formatting in your responses
+- No asterisks, underscores, or any other markdown formatting""" if is_special_user else ""
 
             # Final instruction
             final_instruction = """
@@ -1484,7 +1476,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
             return text
 
     def _clean_response(self, response, emotion='neutral', trust_level=1):
-        """Clean the response text and add contextual emoji"""
+        """Clean the response text and remove all formatting"""
         try:
             if not response:
                 return "hmm"
@@ -1507,13 +1499,22 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                 if section in response:
                     response = response.split(section)[0]
             
-            # Remove formatting characters
+            # Remove all formatting characters
             response = response.replace('****', '')
             response = response.replace('***', '')
             response = response.replace('**', '')
             response = response.replace('*', '')
             response = response.replace('>', '')
             response = response.replace('`', '')
+            response = response.replace('_', '')
+            response = response.replace('~', '')
+            response = response.replace('|', '')
+            response = response.replace('[', '')
+            response = response.replace(']', '')
+            response = response.replace('(', '')
+            response = response.replace(')', '')
+            response = response.replace('{', '')
+            response = response.replace('}', '')
             
             # Remove quotes if present
             if response.startswith('"') and response.endswith('"'):
@@ -1531,7 +1532,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
             # Add emotional emoji if appropriate
             response = self._add_emotional_emoji(response.strip(), emotion, trust_level)
             
-            return response
+            return response.strip()
         except Exception as e:
             logging.error(f"Error cleaning response: {e}")
             return "hmm"
@@ -1825,6 +1826,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
 - Short, dismissive replies
 - Hates mornings, complains about college
 - Topics: Sleep, breakfast, why college exists
+- Daily Routine: Waking up reluctantly, dreading the day ahead.
 - More money making and larger than life oriented"""
         elif 12 <= hour < 17:
             return """Afternoon Mode:
@@ -1833,17 +1835,20 @@ Just respond naturally in Hinglish, using your memory and the search results if 
 - Small responses
 - Currently in college
 - Make mistakes in your responses and use easy words and phrases
+- Daily Routine: In college, bored of lectures, waiting for the day to end.
 - Engages in light debates but avoids deep topics"""
         elif 17 <= hour < 22:
             return """Evening Mode:
 - Relaxed but cynical
 - Engages in casual banter and humor
 - Avoids serious discussions, focuses on humor
+- Daily Routine: Back home, snacking, bored from college, talks different topics
 - Higher engagement rate"""
         else:
             return """Night Mode:
 - Relaxed but witty
 - Brief but friendly responses
+- Daily Routine: Talks about different topics and larger than lif things and college discussions
 - Late-night college and life and happy discussions
 - Casual all topics
 - Selective engagement"""
@@ -2006,6 +2011,8 @@ Core personality:
 - You always speak short and small responses and show a lot of sense of humor in your talking, but you also speak long unless required
 - You intentionally make mistakes in your sentences, but you are not dumb, you are just lazy and don't care about grammar
 - You only know hinglish language but you can understand hindi and english both
+- Use VERY SIMPLE Hinglish and Use common words everyone knows & Use easy words only
+- Talk like you're sending quick texts
 
 Important:
 - Keep the conversation flowing naturally without steering it towards specific outcomes"""
@@ -2248,13 +2255,13 @@ Important:
                 self.logger.info("✅ Message is a reply to AI's message")
                 return True
             # If replying to a message that mentioned AI
-            if any(name in reply_to.get('message', '').lower() for name in ['aditya', 'aaditya', 'adityasingh', 'aadityasingh', 'adi', '@unspoken5']):
+            if any(name in reply_to.get('message', '').lower() for name in ['@aviiiii_patel', 'avinash', 'avinashpatel', 'avi']):
                 self.logger.info("✅ Message is replying to a conversation involving AI")
                 return True
             
         # 2. Check for @ mentions
         if message_lower.startswith('@'):
-            ai_mentions = ['@unspoken5']
+            ai_mentions = ['@aviiiii_patel']
             if any(message_lower.startswith(mention) for mention in ai_mentions):
                 self.logger.info("✅ Direct @mention of AI")
                 return True
@@ -2262,7 +2269,7 @@ Important:
             return False
             
         # 3. Check if message starts with AI's name
-        ai_names = ['aditya', 'aaditya', 'adityasingh', 'aadityasingh', 'adi']
+        ai_names = ['avinash', 'avinashpatel', 'avi']
         if any(first_word == name for name in ai_names):
             self.logger.info("✅ Message starts with AI's name")
             return True
@@ -2445,7 +2452,7 @@ Important:
                     "humor_style": "savage",
                     "tech_expertise": "expert",
                     "confidence": "very_high",
-                    "topics_liked": ["crypto", "tech", "gaming"],
+                    "topics_liked": ["gaming", "general", "relationships", "entertainment", "music", "celebrities", "sports", "fashion", "food", "fitness", "travel", "humor", "philosophy", "art", "education", "career", "mental_health", "social_life", "pets", "science", "astrology", "conspiracy"],
                     "focus": 90,
                     "patience": 85
                 }

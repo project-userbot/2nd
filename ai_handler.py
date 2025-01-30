@@ -41,6 +41,7 @@ class ConversationState:
             'college': ['college', 'lecture', 'assignment', 'exam', 'bsc', 'it', 'coding', 'project', 'submission', 'practical'],
             'tech': ['coding', 'javascript', 'html', 'css', 'web dev', 'programming', 'developer', 'software', 'tech', 'computer'],
             'mumbai': ['local', 'train', 'andheri', 'mumbai', 'marine drive', 'bandra', 'street food', 'vada pav', 'traffic'],
+            'memes': ['meme', 'trend', 'viral', 'funny', 'joke', 'comedy', 'roast', 'troll', 'dank'],
             'crypto': ['crypto', 'bitcoin', 'eth', 'trading', 'investment', 'market', 'portfolio', 'loss', 'profit'],
             'career': ['job', 'career', 'future', 'salary', 'interview', 'internship', 'work', 'office', 'corporate'],
             'social': ['youtube', 'instagram', 'social media', 'followers', 'subscribers', 'content', 'viral', 'trending'],
@@ -59,7 +60,7 @@ class ConversationState:
         interest_level = 0
         
         # Core topics get high interest
-        core_topics = ['music', 'gaming', 'tech', 'college', 'mumbai', 'relationships', 'crypto', 'career', 'social', 'personal', 'conspiracy']
+        core_topics = ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
         for topic, weight in topics:
             if topic in core_topics:
                 interest_level += weight
@@ -137,7 +138,7 @@ class ConversationState:
             return True
             
         # High chance for core topics
-        if any(topic in ['gaming', 'crypto', 'tech', 'general', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy'] for topic, _ in topics):
+        if any(topic in ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy'] for topic, _ in topics):
             return random.random() < 0.8  # 80% chance
             
         # Lower chance for other topics
@@ -215,7 +216,9 @@ class ConversationState:
 
     def update_current_topic(self, group_id, message):
         """Update the current topic based on the message"""
-        topics = self._detect_topics(message)
+        # Get past interactions from conversation history
+        past_interactions = self.conversation_history.get(group_id, [])[-3:]  # Get last 3 messages
+        topics = self._detect_topics(message, past_interactions)
         if topics:
             self.group_topics[group_id]['current_topic'] = topics  # Use the detected topic
         else:
@@ -285,7 +288,7 @@ class ConversationState:
             # 1a. Check @ mentions
             if '@' in message_lower:
                 # If it's @unspoken5 or similar variations, message is for AI
-                if any(ai_name in message_lower for ai_name in ['@aviiiii_patel']):
+                if any(ai_name in message_lower for ai_name in ['@unspoken5']):
                     return False
                 # Otherwise message is for someone else
                 return True
@@ -294,7 +297,7 @@ class ConversationState:
             for member in group_members:
                 member_name = str(member).lower()
                 # Skip if it's AI's name
-                if any(ai_name in member_name for ai_name in ['avinash', 'avinash patel', 'avii']):
+                if any(ai_name in member_name for ai_name in ['aditya', 'adi', 'adityasingh', 'aadityasingh']):
                     continue
                 # If message contains other user's name, it's targeted at them
                 if member_name in message_lower:
@@ -341,14 +344,14 @@ class ConversationState:
             
             # 1. Check @ mentions
             if '@' in message_lower:
-                ai_mentions = ['@aviiiii_patel']
+                ai_mentions = ['@unspoken5']
                 should_respond = any(mention in message_lower for mention in ai_mentions)
                 logging.info(f"@ mention check: {'Should respond' if should_respond else 'Should not respond'}")
                 return should_respond
                 
             # 2. Check direct name usage
             words = message_lower.split()
-            ai_names = ['avinash', 'avinash patel']
+            ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
             should_respond = any(name in words for name in ai_names)
             logging.info(f"Name usage check: {'Should respond' if should_respond else 'Should not respond'}")
             return should_respond
@@ -370,13 +373,13 @@ class ConversationState:
             
         # Check for @ mentions
         if '@' in message_lower:
-            ai_mentions = ['@aviiiii_patel']
+            ai_mentions = ['@unspoken5']
             if any(mention in message_lower for mention in ai_mentions):
                 return True
             return False  # Message mentions someone else
             
         # Check for direct name mentions
-        ai_names = ['avinash', 'avinash patel']
+        ai_names = ['aditya', 'adi', 'adityasingh', 'aadityasingh']
         words = message_lower.split()
         if any(name in words for name in ai_names):
             return True
@@ -416,8 +419,8 @@ class GeminiHandler:
             'sleep_start_time': None,
             'wake_time': None
         }
-        self.name_variations = ['avinash', 'avinash patel', 'patel', 'bhai']
-        self.interests = ['gaming', 'crypto', 'tech', 'general', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
+        self.name_variations = ['aditya', 'adi', 'aadi', 'bhai']
+        self.interests = ['gaming', 'crypto', 'tech', 'general', 'memes', 'relationships', 'entertainment', 'music', 'celebrities', 'sports', 'fashion', 'food', 'fitness', 'travel', 'humor', 'philosophy', 'art', 'education', 'career', 'mental_health', 'social_life', 'pets', 'science', 'astrology', 'conspiracy']
         
         # Initialize chat with context
         self.reset_chat()
@@ -501,7 +504,7 @@ Core Personality Traits:
 Daily Life:
 1. Wakes up late, always rushing to college
 2. Skips first lecture most days
-3. Sits in the last bench, chats and wastes time
+3. Sits in the last bench, makes memes during lectures
 4. Active in college music club
 5. Practices guitar 2 hours daily
 6. Struggles with deadlines and assignments
@@ -511,7 +514,7 @@ Daily Life:
 Interests & Hobbies:
 1. Music (Guitar, Rock bands, Underground indie scene)
 2. Gaming (PC gamer, loves FPS games)
-3. Loves telegram and a bit known about telegram features
+3. Memes and social media trends
 4. Basic coding (HTML, CSS, JavaScript)
 5. Street food and cafe hopping
 6. Cryptocurrency (small investor, lost money)
@@ -533,10 +536,11 @@ Communication Style:
 3. Short attention span in conversations
 4. Shows attitude but not disrespectful
 5. Uses humor to avoid emotional topics
-6. More engaged in topics about college or music or movies 
+6. More engaged in topics about music, gaming, or memes
 7. Gets annoyed by repeated messages or boring topics
 8. Switches between friendly and dismissive based on mood
 9. Uses minimal emojis, prefers text expressions
+10. Often shares memes or song recommendations
 
 Response Guidelines:
 - Match the language style of others (e.g., hinglish, slang) but you speak only in hinglish
@@ -692,7 +696,7 @@ Common Phrases:
 
             # Check if message contains topics of interest
             topics = self.conversation_state._detect_topics(message)
-            if any(topic in ['music', 'gaming', 'tech', 'college', 'mumbai', 'relationships', 'crypto', 'career', 'social', 'personal', 'conspiracy'] for topic, _ in topics):
+            if any(topic in ['crypto', 'tech', 'gaming', 'memes'] for topic, _ in topics):
                 base_probability += 0.3  # +30% for interesting topics
             
             # Check if part of active conversation
@@ -955,7 +959,7 @@ Common Phrases:
             return {
                 "mood": "Little tired, just came from college, intrested in talking",
                 "chatting_style": "Laid-back with sarcastic remarks",
-                "topics_liked": ["making fun of others", "college gossip"],
+                "topics_liked": ["making fun of others", "college gossip", "memes"],
                 "engagement_level": 90,
                 "interest_level": 90,
                 "humor": 90,
@@ -972,7 +976,7 @@ Common Phrases:
             return {
                 "mood": "Woke up, Relaxed and playful and happy and energetic",
                 "chatting_style": "Spontaneous, playful, and energetic",
-                "topics_liked": ["Aspiring to reach life goals", "bored", "balancing studies and hobbies", "job"],
+                "topics_liked": ["Aspiring to reach life goals", "bored", "balancing studies and hobbies", "job", "memes"],
                 "engagement_level": 80,
                 "interest_level": 70,
                 "humor": 70,
@@ -1000,7 +1004,7 @@ Common Phrases:
                 "empathy": 80,
                 "flirting": 100,
                 "mocking": 100,
-                "comments": "Enjoying talking about life and college and roasts and flirting with people"
+                "comments": "Enjoying talking about life and college, sharing memes, and roasts and flirting with people"
             }
         elif 22 <= hour < 24 or hour < 2:
             return {
@@ -1408,6 +1412,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
         topics = {
             'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
             'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
             'relationships': ['flirting'],
             'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
             'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
@@ -1643,7 +1648,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                 user_memory = {
                     'past_interactions': [],
                     'first_interaction': current_time.isoformat(),
-                'last_interaction_date': current_time.isoformat(),
+                    'last_interaction_date': current_time.isoformat(),
                     'interaction_count': 0,
                     'name': None,
                     'gender': None,
@@ -1660,6 +1665,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                         'has_context': False
                     }
                 }
+            
             # Ensure trust_level is present in existing memory
             if 'trust_level' not in user_memory:
                 user_memory['trust_level'] = 1
@@ -1673,17 +1679,22 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                 user_memory['name'] = name
                 user_memory['memory_flags']['remembers_name'] = True
 
+            # Get past interactions for topic detection
+            past_interactions = user_memory.get('past_interactions', [])[-3:]  # Get last 3 messages
+            
+            # Detect topics with past interactions
+            topics = self.conversation_state._detect_topics(message, past_interactions)
+            
             # Update interaction metrics
             user_memory['interaction_count'] = user_memory.get('interaction_count', 0) + 1
             user_memory['last_interaction_date'] = current_time.isoformat()
             
             # Keep last 10 interactions for context
-            past_interactions = user_memory.get('past_interactions', [])
             new_interaction = {
                 'message': message,
                 'response': response_text,
                 'timestamp': current_time.isoformat(),
-                'topics': [],
+                'topics': topics if topics else [],
                 'emotion': None,
                 'referenced_past': False
             }
@@ -1697,19 +1708,16 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                         new_interaction['referenced_past'] = True
                         break
 
-            # Detect topics in the message
-            topics = self.conversation_state._detect_topics(message)
-            new_interaction['topics'] = [topic for topic, _ in topics]
-            
             # Update topics discussed
-            user_memory['topics_discussed'] = list(set(
-                user_memory.get('topics_discussed', []) + 
-                new_interaction['topics']
-            ))
+            if topics:
+                if 'topics_discussed' not in user_memory:
+                    user_memory['topics_discussed'] = []
+                if topics not in user_memory['topics_discussed']:
+                    user_memory['topics_discussed'].append(topics)
             
             # Keep track of recent topics
             user_memory['recent_topics'] = (user_memory.get('recent_topics', [])[-4:] + 
-                                          new_interaction['topics'])[-5:]
+                                          [topics] if topics else [])[-5:]
 
             # Store the interaction
             past_interactions.append(new_interaction)
@@ -1731,7 +1739,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
 
             # Update memory flags
             user_memory['memory_flags']['has_context'] = len(past_interactions) >= 3
-            user_memory['memory_flags']['remembers_topics'] = len(user_memory['topics_discussed']) > 0
+            user_memory['memory_flags']['remembers_topics'] = len(user_memory.get('topics_discussed', [])) > 0
 
             # Update Firebase with new memory
             await self.firebase_handler.update_user_memory(user_id, user_memory)
@@ -1770,10 +1778,10 @@ Just respond naturally in Hinglish, using your memory and the search results if 
                 current_emotion,
                 self.context_manager.get_current_context()
             )
-
+            
         except Exception as e:
-            logging.error(f"Error updating states: {str(e)}")
-            logging.exception("Full exception:")
+            logging.error(f"Error updating states: {e}")
+            logging.error("Full exception:", exc_info=True)
 
     def update_group_learning(self, message, user_id):
         """Update group learning based on messages"""
@@ -1839,6 +1847,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
         topics = {
             'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
             'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
             'relationships': ['flirting'],
             'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
             'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
@@ -1923,7 +1932,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
             return """Evening Mode:
 - Relaxed but cynical
 - Engages in casual banter and humor
-- Roasts friends and others using his high sense of humor
+- Shares memes and roasts friends
 - Avoids serious discussions, focuses on humor
 - Higher engagement rate
 - Never suggest or propose any activities, tasks, or actions nor ask or tell other users to do so, handle such situations naturally
@@ -2420,6 +2429,7 @@ Important:
         topics = {
             'tech': ['coding', 'gadgets', 'software', 'ai', 'tech', 'dev', 'machine learning', 'cybersecurity', 'startup', 'data science'],
             'gaming': ['game', 'gaming', 'steam', 'discord', 'twitch', 'xbox', 'playstation', 'nintendo', 'fps', 'mmorpg', 'lol', 'pubg', 'esports'],
+            'memes': ['meme', 'troll', 'lol', 'lmao', 'kek', 'based', 'chad', 'copypasta', 'ratio', 'cringe', 'sus', 'viral'],
             'relationships': ['flirting'],
             'movies': ['tv_shows', 'netflix', 'anime', 'manga', 'kdrama', 'series', 'binge_watching', 'streaming', 'cinema'],
             'music': ['spotify', 'playlist', 'rap', 'hiphop', 'rock', 'pop', 'concert', 'album', 'artist', 'festival', 'lyrics', 'gaana', 'bollywood songs'],
@@ -2563,7 +2573,7 @@ Important:
                     "humor_style": "savage",
                     "tech_expertise": "expert",
                     "confidence": "very_high",
-                    "topics_liked": ['music', 'gaming', 'tech', 'college', 'mumbai', 'relationships', 'crypto', 'career', 'social', 'personal', 'conspiracy'],
+                    "topics_liked": ["crypto", "tech", "gaming", "memes"],
                     "focus": 90,
                     "patience": 85
                 }

@@ -1107,6 +1107,9 @@ Recent messages:
                 for result in search_results:
                     memory_context += f"\n- {result['content']}"
 
+            # Determine if the user is a special user
+            is_special_user = str(user_id) in self.special_users
+
             # Create base prompt
             base_prompt = f"""You are Avinash Patel, a 20-year-old college student from Mumbai. Someone just said: "{message}"
 

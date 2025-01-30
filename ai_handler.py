@@ -401,7 +401,7 @@ class GeminiHandler:
         # Initialize other components
         self.api_key = "AIzaSyBqiLPHg5uEFWmZyrBIKHvwBX2BBr4QgZU"
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.model = genai.GenerativeModel('gemini-1.5-pro')
         self.context_manager = ContextManager()
         self.chat = None
         self.relationships = {}
@@ -1247,6 +1247,9 @@ Just respond naturally in Hinglish, using your memory and the search results if 
 
             # Combine all parts
             prompt = base_prompt + memory_instructions + special_instructions + core_traits + response_style + reminders + special_reminders + final_instruction
+            
+            # Wait for 140 seconds before generating a response
+            await asyncio.sleep(140)
 
             # Generate response through Gemini
             response = self.chat.send_message(prompt)

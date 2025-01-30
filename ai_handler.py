@@ -875,7 +875,7 @@ Generate a natural response:"""
                 "empathy": 30,
                 "flirting": 50,
                 "mocking": 80,
-                "comments": "Just woke up, hates mornings, Just got out of bed. College starts in a couple of hours, Dreading the day ahead.",  complains about college"
+                "comments": "Just woke up, hates mornings, Just got out of bed, College starts in a couple of hours, Dreading the day ahead, complains about college"
             }
         elif 9 <= hour < 12:
             return {
@@ -893,7 +893,7 @@ Generate a natural response:"""
                 "flirting": 90,
                 "mocking": 90,
                 "comments": "High energy, roasting friends, In college, sarcastic remarks, light debates",
-            "daily_routine": "Currently in college. Bored of lectures, waiting for the bell to ring. Let's talk about anything but studies, gives short replies"
+            "daily_routine": "Currently in college. Bored of lectures, waiting for the bell to ring. Talk about anything but studies, gives short replies"
             }
         elif 12 <= hour < 15:
             return {

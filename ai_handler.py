@@ -2030,7 +2030,7 @@ Important:
                     logging.error(f"Error during topic induction: {str(e)}")
                     break
 
-                await asyncio.sleep(60)  # Wait for a minute before the next message
+                await asyncio.sleep(140)  # Wait for a minute before the next message
         except Exception as e:
             logging.error(f"Error inducing topic: {str(e)}")
 

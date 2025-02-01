@@ -26,6 +26,9 @@ class ConversationState:
         self.message_buffers = {}  # {group_id: {user_id: {last_message_time, messages}}}
         self.MESSAGE_COMPLETE_DELAY = 2.0  # Wait 2 seconds to determine if message is complete
         self.last_message_time = {}  # Track message timing per user
+        # Add reply tracking
+        self.reply_chain = {}  # {message_id: {'original': str, 'replies': list}}
+        self.last_ai_messages = {}  # {group_id: message_id}
         
     def _detect_topics(self, message, past_interactions):
         """Detect the current topic of conversation"""
@@ -386,6 +389,25 @@ class ConversationState:
         # Don't respond to anything else
         return False
 
+    def _should_respond_to_reply(self, event):
+        """Check if we should respond to a reply chain"""
+        if event.reply_to_msg_id:
+            # Check if this is a reply to AI's message
+            original_msg_id = event.reply_to_msg_id
+            if original_msg_id in self.last_ai_messages.values():
+                return True
+        return False
+
+    def update_reply_chain(self, message_id, original_msg=None, reply_text=None):
+        """Maintain conversation thread context"""
+        if original_msg:
+            self.reply_chain[message_id] = {
+                'original': original_msg,
+                'replies': []
+            }
+        elif reply_text and message_id in self.reply_chain:
+            self.reply_chain[message_id]['replies'].append(reply_text[-3:])  # Keep last 3 replies
+
 class GeminiHandler:
     def __init__(self):
         # Load environment variables
@@ -401,7 +423,7 @@ class GeminiHandler:
         # Initialize other components
         self.api_key = "AIzaSyBqiLPHg5uEFWmZyrBIKHvwBX2BBr4QgZU"
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
         self.context_manager = ContextManager()
         self.chat = None
         self.relationships = {}
@@ -875,7 +897,7 @@ Generate a natural response:"""
                 "empathy": 30,
                 "flirting": 50,
                 "mocking": 80,
-                "comments": "Just woke up, hates mornings, Just got out of bed, College starts in a couple of hours, Dreading the day ahead, complains about college"
+                "comments": "Just woke up, hates mornings, Just got out of bed. College starts in a couple of hours, Dreading the day ahead, and complains about college"
             }
         elif 9 <= hour < 12:
             return {
@@ -893,7 +915,7 @@ Generate a natural response:"""
                 "flirting": 90,
                 "mocking": 90,
                 "comments": "High energy, roasting friends, In college, sarcastic remarks, light debates",
-            "daily_routine": "Currently in college. Bored of lectures, waiting for the bell to ring. Talk about anything but studies, gives short replies"
+            "daily_routine": "Currently in college. Bored of lectures, waiting for the bell to ring. Let's talk about anything but studies, gives short replies"
             }
         elif 12 <= hour < 15:
             return {
@@ -1024,9 +1046,38 @@ Generate a natural response:"""
             'emotion': 'sleepy'
         }
 
-    async def _generate_contextual_response(self, message, personality, user_memory, current_topic, chat_id, user_id):
-        """Generate response considering user and group context"""
+    async def _generate_contextual_response(self, message, personality, user_memory, current_topic, chat_id, user_id, reply_to=None):
+        """Generate response considering conversation context and replies"""
         try:
+            # Get conversation context including replies
+            context_messages = []
+            if reply_to and reply_to.get('from_ai'):
+                context_messages.append(f"Previous AI message: {reply_to['message']}")
+                
+            # Add recent conversation history
+            recent_messages = self._get_conversation_context(chat_id)
+            for msg in recent_messages[-3:]:  # Last 3 messages
+                context_messages.append(f"{msg['user_id']}: {msg['message']}")
+                
+            context_str = "\n".join(context_messages)
+            
+            # Update prompt with reply context
+            prompt = f"""You are Avinash Patel responding in a chat. Current conversation context:
+{context_str}
+
+Message to respond to: "{message}"
+
+Important considerations:
+1. You MUST remember previous messages in this conversation thread
+2. If this is a reply to your message, address it specifically
+3. Recognize repeated questions about the same topic
+4. Maintain consistent personality across replies
+5. Acknowledge previous points if needed
+6. Never repeat yourself verbatim
+7. Keep track of who said what in the conversation
+
+Response guidelines:"""
+
             # Store current user ID for personality checks
             self.current_user_id = user_id
             
@@ -1247,7 +1298,7 @@ Just respond naturally in Hinglish, using your memory and the search results if 
 
             # Combine all parts
             prompt = base_prompt + memory_instructions + special_instructions + core_traits + response_style + reminders + special_reminders + final_instruction
-            
+
             # Wait for 140 seconds before generating a response
             await asyncio.sleep(140)
 
@@ -2033,7 +2084,7 @@ Important:
                     logging.error(f"Error during topic induction: {str(e)}")
                     break
 
-                await asyncio.sleep(140)  # Wait for a minute before the next message
+                await asyncio.sleep(60)  # Wait for a minute before the next message
         except Exception as e:
             logging.error(f"Error inducing topic: {str(e)}")
 
@@ -2161,8 +2212,20 @@ Important:
         return False
 
     async def get_response(self, message, chat_id=None, user_id=None, reply_to=None):
-        """Get AI response for the message"""
+        """Get AI response with conversation thread awareness"""
         try:
+            # Track message relationships
+            if reply_to and reply_to.get('from_ai'):
+                self.conversation_state.last_ai_messages[chat_id] = reply_to['message_id']
+            
+            # Store message in conversation history
+            self._update_conversation_context(
+                chat_id,
+                message,
+                user_id,
+                response=response_text if response else None
+            )
+            
             # First check if message is for AI
             if not self._is_message_for_ai(message, reply_to):
                 self.logger.info("Message not directed at AI - skipping")
@@ -2219,7 +2282,8 @@ Important:
                 user_memory=user_memory,
                 current_topic=current_topic,
                 chat_id=chat_id,
-                user_id=user_id
+                user_id=user_id,
+                reply_to=reply_to
             )
             
             if not response:

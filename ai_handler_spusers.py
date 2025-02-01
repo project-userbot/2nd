@@ -233,10 +233,7 @@ class SpecialUsersHandler:
         return False
 
     def _is_message_targeted(self, message: str, group_members: list) -> bool:
-        """
-        Core message targeting detection.
-        Returns True if message is targeted to someone else (not the AI).
-        """
+        """Check if message is targeted to someone else (improved reply handling)"""
         if not message or not group_members:
             return False
             
@@ -283,6 +280,14 @@ class SpecialUsersHandler:
                 quick_replies = {'haan', 'nahi', 'ha', 'hmm', 'ok', 'achha', 'thik', 'bilkul'}
                 if any(reply in message_lower for reply in quick_replies):
                     return True
+        
+        # 3. Check if message is a reply to AI's message
+        if hasattr(self, 'last_ai_message') and self.last_ai_message:
+            if message.startswith('@') or message.lower().startswith(('re:', 'replying to')):
+                # Check if replying to AI's last message
+                ai_mentions = ['@aditya', '@aaditya', '@adityasingh']
+                if any(mention in message.lower() for mention in ai_mentions):
+                    return False  # Message is for AI
         
         # Update last message time
         self._last_message_time = current_time

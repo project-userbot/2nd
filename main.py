@@ -186,66 +186,51 @@ class UserBot:
         # Register command handler
         @self.client.on(events.NewMessage(pattern=r'/\w+'))
         async def handle_commands(event):
-            """Handle bot commands"""
-            try:
-                # Get the sender
-                sender = await event.get_sender()
-                if not sender:
-                    return
+            if event.message.from_id != await self.client.get_me():
+                return
 
-                # Only process commands from admin or special users
-                if str(sender.id) != str(self.admin_id) and str(sender.id) not in self.ai_handler.special_users:
-                    return
+            command = event.message.text.split()[0].lower()
+            args = event.message.text.split()[1:] if len(event.message.text.split()) > 1 else []
 
-                command = event.message.text.split()[0].lower()
-                args = event.message.text.split()[1:] if len(event.message.text.split()) > 1 else []
-
-                logger.info(f"Processing command: {command} with args: {args}")
-
-                if command == '/help':
-                    await self.show_help(event)
-                elif command == '/status':
-                    await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
-                elif command == '/setgroup':
-                    if args:
-                        try:
-                            new_group_id = int(args[0])
-                            self.selected_group_id = new_group_id
-                            await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
-                        except ValueError:
-                            await event.reply("Please provide a valid group ID")
-                    else:
-                        await event.reply("Usage: /setgroup -123456789")
-                elif command == '/stop':
-                    self.is_responding = False
-                    await event.reply("Stopped responding in current group")
-                elif command == '/start':
-                    self.is_responding = True
-                    await event.reply("Started responding in current group")
-                elif command == '/refresh':
-                    result = await self.refresh_selection()
-                    await event.reply(result)
-                elif command == '/context':
-                    await self.handle_context_commands(event, command, args)
-                elif command == '/contexts':
-                    await self.handle_context_commands(event, command, args)
-                elif command == '/addcontext':
-                    await self.handle_context_commands(event, command, args)
-                elif command == '/resetcontext':
-                    await self.handle_context_commands(event, command, args)
+            if command == '/help':
+                await self.show_help(event)
+            elif command == '/status':
+                await event.reply(f"Currently monitoring group ID: {self.selected_group_id}")
+            elif command == '/setgroup':
+                if args:
+                    try:
+                        new_group_id = int(args[0])
+                        self.selected_group_id = new_group_id
+                        await event.reply(f"Now monitoring group ID: {self.selected_group_id}")
+                    except ValueError:
+                        await event.reply("Please provide a valid group ID")
                 else:
-                    await event.reply("Unknown command. Type /help for a list of available commands.")
-
-            except Exception as e:
-                logger.error(f"Error processing command: {str(e)}")
-                await event.reply("Error processing command. Please try again.")
+                    await event.reply("Usage: /setgroup -123456789")
+            elif command == '/stop':
+                self.is_responding = False
+                await event.reply("Stopped responding in current group")
+            elif command == '/start':
+                self.is_responding = True
+                await event.reply("Started responding in current group")
+            elif command == '/refresh':
+                await self.refresh_group_selection(event)
+            elif command == '/context':
+                await self.show_or_change_context(event, args)
+            elif command == '/contexts':
+                await self.list_all_contexts(event)
+            elif command == '/addcontext':
+                await self.add_new_context(event, args)
+            elif command == '/resetcontext':
+                await self.reset_chat_with_context(event)
+            else:
+                await event.reply("Unknown command. Type /help for a list of available commands.")
 
         # Message handler
-        @self.client.on(events.NewMessage)
+        @self.client.on(events.NewMessage(func=lambda e: e.is_private or e.mentioned))
         async def handle_messages(event):
             try:
-                # Skip commands
-                if event.message.text and event.message.text.startswith('/'):
+                # Skip messages that don't mention or reply to AI
+                if not await self._should_handle_message(event):
                     return
 
                 # Skip if not in selected group or responding disabled
@@ -263,31 +248,34 @@ class UserBot:
                 logger.info(f"Message from {'⭐ Special User' if is_special_user else '👤 Regular User'} (ID: {user_id})")
 
                 # Get reply information
-                reply_to = None
-                if event.reply_to:
+                reply_context = None
+                if event.reply_to_msg_id:
                     reply_msg = await event.get_reply_message()
                     if reply_msg:
-                        # Check if the message is from the AI (our bot)
-                        is_from_ai = False
-                        if hasattr(reply_msg.sender, 'id'):
-                            me = await self.client.get_me()
-                            is_from_ai = reply_msg.sender.id == me.id
-                        
-                        reply_to = {
+                        is_from_ai = reply_msg.sender_id == (await self.client.get_me()).id
+                        reply_context = {
+                            'message_id': reply_msg.id,
                             'message': reply_msg.text,
-                            'from_ai': is_from_ai
+                            'from_ai': is_from_ai,
+                            'sender_id': reply_msg.sender_id
                         }
-                        logger.info(f"Reply detected - from_ai: {is_from_ai}")
+                        logger.info(f"Reply context: {reply_context}")
 
-                # Get AI response
+                # Get AI response with reply context
                 response_data = await self.ai_handler.get_response(
                     message=message_text,
                     chat_id=event.chat_id,
                     user_id=user_id,
-                    reply_to=reply_to
+                    reply_to=reply_context  # Pass full reply context
                 )
                 
+                # Update conversation state
                 if response_data:
+                    self.ai_handler.conversation_state.update_reply_chain(
+                        message_id=event.message.id,
+                        reply_text=response_data['text']
+                    )
+                    
                     logger.info(f"Sending response: {response_data['text']}")
                     
                     # Add initial delay
@@ -350,10 +338,25 @@ class UserBot:
 
         return False  # Not a context command
 
-    async def refresh_group_selection(self, event):
-        """Refresh group selection"""
-        result = await self.refresh_selection()
-        await event.reply(result)
+    async def _should_handle_message(self, event):
+        """Determine if we should process this message"""
+        # Check if message mentions AI
+        if event.mentioned:
+            return True
+        
+        # Check if it's a reply to AI's message
+        if event.reply_to_msg_id:
+            reply_msg = await event.get_reply_message()
+            if reply_msg and reply_msg.sender_id == (await self.client.get_me()).id:
+                return True
+        
+        # Check message text for AI mentions
+        message_lower = event.text.lower()
+        ai_names = ['avinash', 'avinash patel', 'avi']
+        if any(name in message_lower for name in ai_names):
+            return True
+        
+        return False
 
 if __name__ == '__main__':
     userbot = UserBot()

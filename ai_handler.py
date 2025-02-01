@@ -423,7 +423,7 @@ class GeminiHandler:
         # Initialize other components
         self.api_key = "AIzaSyBqiLPHg5uEFWmZyrBIKHvwBX2BBr4QgZU"
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
         self.context_manager = ContextManager()
         self.chat = None
         self.relationships = {}
@@ -2218,14 +2218,6 @@ Important:
             if reply_to and reply_to.get('from_ai'):
                 self.conversation_state.last_ai_messages[chat_id] = reply_to['message_id']
             
-            # Store message in conversation history
-            self._update_conversation_context(
-                chat_id,
-                message,
-                user_id,
-                response=response_text if response else None
-            )
-            
             # First check if message is for AI
             if not self._is_message_for_ai(message, reply_to):
                 self.logger.info("Message not directed at AI - skipping")
@@ -2248,6 +2240,14 @@ Important:
             # Get user memory and context
             user_memory = await self.firebase_handler.get_user_memory(user_id)
             recent_messages = self._get_conversation_context(chat_id)
+            
+            # Store message in conversation history
+            self._update_conversation_context(
+                chat_id,
+                message,
+                user_id,
+                response=None  # Initialize with None, will update after generating response
+            )
             
             # Get time-based personality
             time_personality = self._get_time_personality()
@@ -2276,7 +2276,7 @@ Important:
                 dynamic_personality['chattiness'] = 0.5
                 dynamic_personality['emoji_use'] = 'moderate'
             
-            response = await self._generate_contextual_response(
+            response_text = await self._generate_contextual_response(
                 message=message,
                 personality=dynamic_personality,
                 user_memory=user_memory,
@@ -2286,15 +2286,23 @@ Important:
                 reply_to=reply_to
             )
             
-            if not response:
+            if not response_text:
                 return None
                 
             # Clean and format response
             cleaned_response = self._clean_and_contextualize_response(
-                response,
+                response_text,
                 dynamic_personality,
                 current_topic,
                 user_style
+            )
+            
+            # Update conversation context with the generated response
+            self._update_conversation_context(
+                chat_id,
+                message,
+                user_id,
+                response=cleaned_response
             )
             
             # Update states

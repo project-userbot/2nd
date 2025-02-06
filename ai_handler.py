@@ -423,7 +423,7 @@ class GeminiHandler:
         # Initialize other components
         self.api_key = "AIzaSyBqiLPHg5uEFWmZyrBIKHvwBX2BBr4QgZU"
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.context_manager = ContextManager()
         self.chat = None
         self.relationships = {}
